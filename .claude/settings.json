@@ -21,7 +21,8 @@
       "Bash(git diff *)",
       "Bash(git log *)",
       "Bash(git tag -l *)",
-      "Bash(git remote -v)"
+      "Bash(git remote -v)",
+      "Bash(bun run *)"
     ],
     "deny": [
       "Bash(git reset --hard *)",

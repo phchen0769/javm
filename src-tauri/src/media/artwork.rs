@@ -18,6 +18,12 @@ pub const POSTER_SUFFIX: &str = "poster";
 pub const FANART_SUFFIX: &str = "fanart";
 /// 横版缩略图后缀
 pub const THUMB_SUFFIX: &str = "thumb";
+/// 网格小缩略图后缀（媒体库网格快速解码用）
+pub const THUMB_SMALL_SUFFIX: &str = "thumbsm";
+
+/// 网格缩略图最长边（像素）。原图动辄 800~1920px，网格卡片实际宽约 200~380px，
+/// 缩到 480px 长边即够清晰，解码开销比全尺寸小一个数量级，是治本卡顿的关键。
+pub const COVER_THUMB_MAX_EDGE: u32 = 480;
 
 /// 竖版海报宽高比（378:538，JAV 行业封面右侧裁切的标准比例，与前端 constants.ts 一致）
 const POSTER_ASPECT_W_OVER_H: f32 = 378.0 / 538.0;
@@ -77,6 +83,52 @@ pub fn is_undersized_preview(path: &str) -> bool {
 /// 图集文件路径：`<dir>/<stem>-<suffix>.jpg`
 pub fn artwork_path(dir: &Path, stem: &str, suffix: &str) -> PathBuf {
     dir.join(format!("{}-{}.jpg", stem, suffix))
+}
+
+/// 从已有封面源图生成网格小缩略图 `<stem>-thumbsm.jpg`（保持比例，最长边 [`COVER_THUMB_MAX_EDGE`]）。
+///
+/// 用于媒体库网格：原图全尺寸在 WebView 里逐张解码是列表卡顿/CPU 打满的主因，
+/// 缩到长边约 480px 后解码开销大幅下降。源本身已足够小时直接复制，避免无谓重编码。
+/// 成功返回缩略图绝对路径，失败返回 None（调用方回退用原图）。
+pub fn generate_cover_thumbnail(source: &Path, dir: &Path, stem: &str) -> Option<String> {
+    // 按内容猜格式（源可能是命名为 .jpg 的 webp/png），只解码一次
+    let img = match image::ImageReader::open(source)
+        .and_then(|reader| reader.with_guessed_format())
+    {
+        Ok(reader) => match reader.decode() {
+            Ok(img) => img,
+            Err(e) => {
+                log::error!("[artwork] event=thumbsm_decode_failed src={} error={}", source.display(), e);
+                return None;
+            }
+        },
+        Err(e) => {
+            log::error!("[artwork] event=thumbsm_open_failed src={} error={}", source.display(), e);
+            return None;
+        }
+    };
+
+    let (width, height) = (img.width(), img.height());
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    let dst = artwork_path(dir, stem, THUMB_SMALL_SUFFIX);
+    // 长边超过阈值才缩放；resize 保持比例、把图放进 max×max 盒子内
+    let out = if width.max(height) > COVER_THUMB_MAX_EDGE {
+        img.resize(COVER_THUMB_MAX_EDGE, COVER_THUMB_MAX_EDGE, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+
+    // JPEG 不支持 alpha，统一转 RGB8 再保存
+    match out.to_rgb8().save(&dst) {
+        Ok(_) => Some(dst.to_string_lossy().to_string()),
+        Err(e) => {
+            log::error!("[artwork] event=thumbsm_save_failed dst={} error={}", dst.display(), e);
+            None
+        }
+    }
 }
 
 /// 从远程/缓存 URL 产出标准图集。

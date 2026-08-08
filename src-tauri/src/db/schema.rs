@@ -246,6 +246,7 @@ impl Database {
                 cover_width INTEGER,
                 cover_height INTEGER,
                 is_uncensored INTEGER DEFAULT 0,
+                cover_thumb TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 scraped_at TEXT
@@ -258,6 +259,8 @@ impl Database {
         let _ = conn.execute("ALTER TABLE videos ADD COLUMN cover_height INTEGER", []);
         // 兼容旧库：补有码/无码标记列（有码无码分轨：识别为无码作品的视频置 1）。
         let _ = conn.execute("ALTER TABLE videos ADD COLUMN is_uncensored INTEGER DEFAULT 0", []);
+        // 兼容旧库：补网格缩略图列（媒体库网格快速解码用的小尺寸横版缩略图路径，回填生成）。
+        let _ = conn.execute("ALTER TABLE videos ADD COLUMN cover_thumb TEXT", []);
         log::info!("[db] event=create_videos_table_succeeded");
 
         // 3. 关联表

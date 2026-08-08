@@ -22,6 +22,10 @@ export const useVideoStore = defineStore('video', () => {
     const coverVersions = ref<Record<string, number>>({})
     let refreshTimer: ReturnType<typeof setTimeout> | null = null
     let scheduledRefreshIncludesDirectories = false
+    let lastRefreshAt = 0
+    // 批量刮削时每个任务完成都会请求刷新，而单次整库刷新含数千次文件系统 stat；
+    // 故把刷新节流为「最多每 REFRESH_MIN_INTERVAL 跑一次」，避免刷新风暴打满 CPU。
+    const REFRESH_MIN_INTERVAL = 4000
 
     const normalizePath = (path?: string) => (path || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
 
@@ -276,11 +280,13 @@ export const useVideoStore = defineStore('video', () => {
                     continue
                 }
 
+                // 仅在封面路径真正变化时才 bump（触发前端换图并破缓存）。
+                // 不要把 scanStatus 变化也算进来：批量刮削时状态 0→1→2 频繁跳动，
+                // 会让大量卡片的封面版本号无谓地变，强制全尺寸封面重复解码，拖垮 CPU。
                 if (
                     previousVideo.poster !== nextVideo.poster ||
                     previousVideo.thumb !== nextVideo.thumb ||
-                    previousVideo.fanart !== nextVideo.fanart ||
-                    previousVideo.scanStatus !== nextVideo.scanStatus
+                    previousVideo.fanart !== nextVideo.fanart
                 ) {
                     bumpCoverVersion(nextVideo.id)
                 }
@@ -360,21 +366,29 @@ export const useVideoStore = defineStore('video', () => {
 
     function scheduleRefresh(options?: { includeDirectories?: boolean; delay?: number }) {
         const includeDirectories = options?.includeDirectories ?? false
-        const delay = options?.delay ?? 250
+        // 已到刷新时机时，仅用 burstDelay 合并「几乎同时到达」的多个完成事件
+        const burstDelay = options?.delay ?? 250
 
         scheduledRefreshIncludesDirectories = scheduledRefreshIncludesDirectories || includeDirectories
 
+        // 已有待触发的刷新：合并本次请求即可，不再叠加定时器（节流核心）
         if (refreshTimer) {
-            clearTimeout(refreshTimer)
+            return
         }
+
+        const sinceLast = Date.now() - lastRefreshAt
+        // 距上次刷新已超过最小间隔 → 只等 burstDelay；否则推迟到间隔末尾，
+        // 保证整库刷新最多每 REFRESH_MIN_INTERVAL 触发一次。
+        const wait = sinceLast >= REFRESH_MIN_INTERVAL ? burstDelay : REFRESH_MIN_INTERVAL - sinceLast
 
         refreshTimer = setTimeout(() => {
             const shouldRefreshDirectories = scheduledRefreshIncludesDirectories
             scheduledRefreshIncludesDirectories = false
             refreshTimer = null
+            lastRefreshAt = Date.now()
 
             void refreshLibrary(shouldRefreshDirectories)
-        }, delay)
+        }, wait)
     }
 
     // ============ Directory Actions ============

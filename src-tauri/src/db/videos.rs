@@ -28,8 +28,9 @@ impl Database {
         cover_width: Option<i32>,
         cover_height: Option<i32>,
     ) -> Result<()> {
+        // 封面路径变更后旧缩略图内容作废，置空 cover_thumb 交由回填重新生成
         conn.execute(
-            "UPDATE videos SET poster = ?, thumb = ?, fanart = ?, cover_width = ?, cover_height = ?, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE videos SET poster = ?, thumb = ?, fanart = ?, cover_width = ?, cover_height = ?, cover_thumb = NULL, updated_at = datetime('now') WHERE id = ?",
             rusqlite::params![poster_path, thumb_path, fanart_path, cover_width, cover_height, video_id],
         )?;
         Ok(())
@@ -64,6 +65,7 @@ impl Database {
                 cover_width = ?,
                 cover_height = ?,
                 is_uncensored = ?,
+                cover_thumb = NULL,
                 scan_status = 2,
                 scraped_at = datetime('now'),
                 updated_at = datetime('now')

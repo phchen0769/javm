@@ -28,6 +28,7 @@ export interface Video {
     poster?: string // 同级 poster 图片路径 (videos.poster)
     thumb?: string // 同级 thumb 图片路径 (videos.thumb)
     fanart?: string // 同级 fanart 图片路径 (videos.fanart)
+    coverThumb?: string // 网格小缩略图路径，回填生成 (videos.cover_thumb)
     coverWidth?: number // 封面宽度像素 (videos.cover_width)
     coverHeight?: number // 封面高度像素 (videos.cover_height)
     isUncensored?: boolean // 是否无码作品 (videos.is_uncensored)

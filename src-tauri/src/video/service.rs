@@ -107,6 +107,7 @@ pub(crate) async fn enrich_videos_with_file_times(mut videos: Vec<serde_json::Va
         let poster = video.get("poster").and_then(|v| v.as_str()).map(str::to_owned);
         let thumb = video.get("thumb").and_then(|v| v.as_str()).map(str::to_owned);
         let fanart = video.get("fanart").and_then(|v| v.as_str()).map(str::to_owned);
+        let cover_thumb = video.get("coverThumb").and_then(|v| v.as_str()).map(str::to_owned);
 
         let semaphore = Arc::clone(&semaphore);
         tasks.spawn(async move {
@@ -115,30 +116,34 @@ pub(crate) async fn enrich_videos_with_file_times(mut videos: Vec<serde_json::Va
                 // 同一并发任务内完成：视频文件时间 + 图集存在性解析
                 let metadata = std::fs::metadata(&video_path);
                 let artwork = resolve_artwork_paths(poster, thumb, fanart);
-                (metadata, artwork)
+                let cover_thumb = cover_thumb.filter(|p| {
+                    let trimmed = p.trim();
+                    !trimmed.is_empty() && std::path::Path::new(trimmed).exists()
+                });
+                (metadata, artwork, cover_thumb)
             })
             .await;
 
-            let (file_created_at, file_modified_at, artwork) = match result {
-                Ok((Ok(metadata), artwork)) => {
+            let (file_created_at, file_modified_at, artwork, cover_thumb) = match result {
+                Ok((Ok(metadata), artwork, cover_thumb)) => {
                     let file_modified_at = metadata.modified().ok().map(system_time_to_rfc3339);
                     let file_created_at = metadata
                         .created()
                         .ok()
                         .or_else(|| metadata.modified().ok())
                         .map(system_time_to_rfc3339);
-                    (file_created_at, file_modified_at, artwork)
+                    (file_created_at, file_modified_at, artwork, cover_thumb)
                 }
-                Ok((Err(_), artwork)) => (None, None, artwork),
-                Err(_) => (None, None, (None, None, None)),
+                Ok((Err(_), artwork, cover_thumb)) => (None, None, artwork, cover_thumb),
+                Err(_) => (None, None, (None, None, None), None),
             };
 
-            (index, file_created_at, file_modified_at, artwork)
+            (index, file_created_at, file_modified_at, artwork, cover_thumb)
         });
     }
 
     while let Some(result) = tasks.join_next().await {
-        let Ok((index, file_created_at, file_modified_at, (poster, thumb, fanart))) = result else {
+        let Ok((index, file_created_at, file_modified_at, (poster, thumb, fanart), cover_thumb)) = result else {
             continue;
         };
 
@@ -154,6 +159,7 @@ pub(crate) async fn enrich_videos_with_file_times(mut videos: Vec<serde_json::Va
         video.insert("poster".to_string(), serde_json::to_value(poster).unwrap_or(serde_json::Value::Null));
         video.insert("thumb".to_string(), serde_json::to_value(thumb).unwrap_or(serde_json::Value::Null));
         video.insert("fanart".to_string(), serde_json::to_value(fanart).unwrap_or(serde_json::Value::Null));
+        video.insert("coverThumb".to_string(), serde_json::to_value(cover_thumb).unwrap_or(serde_json::Value::Null));
     }
 
     videos.sort_by(|left, right| match (

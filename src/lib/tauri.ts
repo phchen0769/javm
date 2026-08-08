@@ -64,6 +64,11 @@ export async function backfillCoverDimensions(): Promise<number> {
     return tauriInvoke<number>('backfill_cover_dimensions')
 }
 
+/** 回填存量视频网格缩略图（降低网格解码开销），返回生成数量 */
+export async function backfillCoverThumbnails(): Promise<number> {
+    return tauriInvoke<number>('backfill_cover_thumbnails')
+}
+
 /** 鑾峰彇鍗曚釜瑙嗛璇︽儏 */
 export async function getVideo(id: string): Promise<Video> {
     return tauriInvoke<Video>('get_video', { id })

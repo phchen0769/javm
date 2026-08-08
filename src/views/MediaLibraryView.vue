@@ -35,7 +35,7 @@ import VirtualGrid from '@/components/VirtualGrid.vue'
 import VideoDetailDialog from '@/components/VideoDetailDialog.vue'
 import ScrapeDialog from '@/components/ScrapeDialog.vue'
 import type { Video, ViewMode, CoverType } from '@/types'
-import { backfillCoverDimensions } from '@/lib/tauri'
+import { backfillCoverDimensions, backfillCoverThumbnails } from '@/lib/tauri'
 
 const ALL_DIRECTORY_VALUE = '__all__'
 
@@ -207,6 +207,15 @@ onMounted(async () => {
     }
   } catch (e) {
     console.error('回填封面尺寸失败:', e)
+  }
+  // 回填存量视频网格缩略图（降低网格解码开销、缓解卡顿），有生成则刷新列表拿到缩略图路径
+  try {
+    const updated = await backfillCoverThumbnails()
+    if (updated > 0) {
+      await videoStore.fetchVideos()
+    }
+  } catch (e) {
+    console.error('回填网格缩略图失败:', e)
   }
 })
 

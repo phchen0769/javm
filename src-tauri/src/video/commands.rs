@@ -150,7 +150,8 @@ pub async fn get_videos(db: State<'_, crate::db::Database>) -> AppResult<Vec<ser
                 v.fast_hash,
                 v.cover_width,
                 v.cover_height,
-                v.is_uncensored
+                v.is_uncensored,
+                v.cover_thumb
             FROM videos v
         "#;
         // 注意：不在 SQL 里排序，最终顺序由 enrich_videos_with_file_times 按文件
@@ -162,6 +163,7 @@ pub async fn get_videos(db: State<'_, crate::db::Database>) -> AppResult<Vec<ser
             .query_map([], |row| {
                 let poster: Option<String> = row.get(11)?;
                 let thumb: Option<String> = row.get(12)?;
+                let cover_thumb: Option<String> = row.get(24)?;
 
                 Ok(serde_json::json!({
                     "id": row.get::<_, String>(0)?,
@@ -192,6 +194,8 @@ pub async fn get_videos(db: State<'_, crate::db::Database>) -> AppResult<Vec<ser
                     "coverWidth": row.get::<_, Option<i64>>(21)?,
                     "coverHeight": row.get::<_, Option<i64>>(22)?,
                     "isUncensored": row.get::<_, Option<i64>>(23)?.unwrap_or(0) != 0,
+                    // 原始缩略图路径，存在性解析同样挪到 enrich 并发阶段
+                    "coverThumb": cover_thumb,
                 }))
             })?;
 
@@ -319,6 +323,80 @@ pub async fn backfill_cover_dimensions(db: State<'_, crate::db::Database>) -> Ap
                     updated += 1;
                 }
             }
+        }
+        Ok(updated)
+    })
+    .await
+    .map_err(|e| AppError::TaskJoin(e.to_string()))?
+}
+
+/// 回填存量视频的网格缩略图：扫描有封面但缺 `cover_thumb` 的记录，从横版大图
+/// （fanart → thumb → poster）生成 `<stem>-thumbsm.jpg` 小图并写回。
+///
+/// 媒体库网格逐张解码全尺寸大图是列表卡顿的主因，缩略图回填后前端优先用它。
+/// 返回成功生成的数量（跳过源缺失/生成失败的记录，下次运行会再尝试）。
+#[tauri::command]
+pub async fn backfill_cover_thumbnails(db: State<'_, crate::db::Database>) -> AppResult<u32> {
+    let conn = db.get_connection()?;
+
+    tokio::task::spawn_blocking(move || -> AppResult<u32> {
+        let targets: Vec<(String, String, String, Option<String>, Option<String>, Option<String>)> = {
+            let mut stmt = conn.prepare(
+                "SELECT id, video_path, dir_path, fanart, thumb, poster FROM videos
+                 WHERE (cover_thumb IS NULL OR cover_thumb = '')
+                   AND (
+                        (fanart IS NOT NULL AND fanart <> '')
+                     OR (thumb IS NOT NULL AND thumb <> '')
+                     OR (poster IS NOT NULL AND poster <> '')
+                   )",
+            )?;
+            let iter = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })?;
+            let mut list = Vec::new();
+            for item in iter {
+                list.push(item?);
+            }
+            list
+        };
+
+        let mut updated = 0u32;
+        for (id, video_path, dir_path, fanart, thumb, poster) in targets {
+            // 与前端选图一致：横版优先（fanart → thumb → poster）
+            let source = fanart
+                .as_deref()
+                .filter(|p| !p.trim().is_empty())
+                .or_else(|| thumb.as_deref().filter(|p| !p.trim().is_empty()))
+                .or_else(|| poster.as_deref().filter(|p| !p.trim().is_empty()));
+            let Some(source) = source else { continue };
+
+            let Some(stem) = std::path::Path::new(&video_path)
+                .file_stem()
+                .and_then(|name| name.to_str())
+            else {
+                continue;
+            };
+
+            let Some(thumb_path) = crate::media::artwork::generate_cover_thumbnail(
+                std::path::Path::new(source),
+                std::path::Path::new(&dir_path),
+                stem,
+            ) else {
+                continue;
+            };
+
+            conn.execute(
+                "UPDATE videos SET cover_thumb = ? WHERE id = ?",
+                rusqlite::params![thumb_path, id],
+            )?;
+            updated += 1;
         }
         Ok(updated)
     })

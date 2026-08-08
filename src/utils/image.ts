@@ -23,11 +23,12 @@ export function toImageSrc(path?: string | null): string | null {
   return convertFileSrc(trimmed.replace(/\\/g, '/'))
 }
 
-/** 封面图集字段（竖版 poster / 横版 thumb / 横版 fanart） */
+/** 封面图集字段（竖版 poster / 横版 thumb / 横版 fanart / 网格小缩略图 coverThumb） */
 export interface CoverImageFields {
   poster?: string
   thumb?: string
   fanart?: string
+  coverThumb?: string
 }
 
 /**
@@ -36,10 +37,20 @@ export interface CoverImageFields {
  * - 竖屏（portrait）：poster → fanart → thumb
  *
  * 缺失时回退另一方向，保证任何布局都不留空白。
+ *
+ * `preferThumbnail` 为真时，横屏模式优先用网格小缩略图 `coverThumb`（大幅降低解码开销，
+ * 媒体库网格专用）；竖屏模式不用它——它是横版小图，塞进竖版卡片比例不对。
  */
-export function resolveCoverImage(video: CoverImageFields, coverType?: string): string | undefined {
+export function resolveCoverImage(
+  video: CoverImageFields,
+  coverType?: string,
+  preferThumbnail = false,
+): string | undefined {
   if (coverType === 'portrait') {
     return video.poster || video.fanart || video.thumb || undefined
+  }
+  if (preferThumbnail && video.coverThumb) {
+    return video.coverThumb
   }
   return video.fanart || video.thumb || video.poster || undefined
 }
