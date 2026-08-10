@@ -22,7 +22,17 @@
       "Bash(git log *)",
       "Bash(git tag -l *)",
       "Bash(git remote -v)",
-      "Bash(bun run *)"
+      "Bash(bun run *)",
+      "Bash(git --no-pager diff)",
+      "Bash(node -e \"JSON.parse\\(require\\('fs'\\).readFileSync\\('src-tauri/tauri.macos.conf.json','utf8'\\)\\); console.log\\('JSON OK'\\)\")",
+      "Bash(bun tauri *)",
+      "Bash(node -e \"const c=require\\('./src-tauri/tauri.conf.json'\\); console.log\\(JSON.stringify\\(c.app.windows,null,2\\)\\)\")",
+      "Bash(node -e \"const c=require\\('./src-tauri/tauri.release.conf.json'\\); console.log\\('顶层键:', Object.keys\\(c\\)\\); console.log\\('app 段:', JSON.stringify\\(c.app||null\\)\\)\")",
+      "Bash(node -e ' *)",
+      "Bash(ls -d /Users/fedorov/.cargo/registry/src/*/tauri-2* 2>/dev/null | grep -vE \"tauri-\\(utils|build|runtime|macros|codegen|plugin|winres\\)\" | head; echo \"---\"; ls -d /Users/fedorov/.cargo/registry/src/*/ 2>/dev/null | head)",
+      "Read(//Users/fedorov/.cargo/registry/src/**)",
+      "Read(//Users/fedorov/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-2.11.5/src/webview/**)",
+      "Read(//Users/fedorov/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-2.11.5/src/**)"
     ],
     "deny": [
       "Bash(git reset --hard *)",

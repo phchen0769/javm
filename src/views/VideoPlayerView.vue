@@ -9,6 +9,7 @@ import 'plyr/dist/plyr.css'
 import Hls from 'hls.js'
 import WindowControls from '@/components/layout/WindowControls.vue'
 import { Button } from '@/components/ui/button'
+import { isMacOS } from '@/lib/platform'
 
 const route = useRoute()
 const videoElement = ref<HTMLVideoElement | null>(null)
@@ -367,7 +368,8 @@ onUnmounted(() => {
         <!-- 自定义顶部栏 (绝对定位，悬浮在视频上方) -->
         <!-- 使用 group-hover:opacity-100 让其在鼠标移入时显示 -->
         <div data-tauri-drag-region
-            class="absolute top-0 left-0 right-0 h-10 bg-gradient-to-b from-black/80 to-transparent z-50 flex items-center pl-4 opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-auto">
+            :class="isMacOS ? 'pl-20' : 'pl-4'"
+            class="absolute top-0 left-0 right-0 h-10 bg-gradient-to-b from-black/80 to-transparent z-50 flex items-center opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-auto">
             <!-- 标题 -->
             <div class="flex-1 text-white text-sm truncate select-none pointer-events-none">
                 {{ videoTitle }}

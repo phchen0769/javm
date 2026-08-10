@@ -17,6 +17,7 @@ import {
   SidebarMenuItem,
   SidebarMenuButton,
 } from '@/components/ui/sidebar'
+import { isMacOS } from '@/lib/platform'
 
 const route = useRoute()
 
@@ -65,7 +66,7 @@ const isActive = (path: string) => {
 
 <template>
   <Sidebar collapsible="icon">
-    <SidebarContent>
+    <SidebarContent :class="{ 'pt-7': isMacOS }">
       <SidebarGroup>
         <SidebarGroupContent>
           <SidebarMenu>

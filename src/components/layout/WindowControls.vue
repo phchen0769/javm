@@ -3,8 +3,13 @@ import { Minus, Square, X, Copy, Pin } from 'lucide-vue-next'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { ref, onMounted } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
+import { isMacOS } from '@/lib/platform'
 
 const appWindow = ref<ReturnType<typeof getCurrentWindow> | null>(null)
+
+// macOS 所有窗口（主窗口 + 播放器）均使用系统原生交通灯（左上角），
+// 隐藏自绘的最小化/最大化/关闭；其他平台保留自绘按钮（右上角）。
+const showSystemButtons = !isMacOS
 const isMaximized = ref(false)
 const isAlwaysOnTop = ref(false)
 
@@ -82,17 +87,20 @@ defineExpose({
       <Pin class="size-4" :fill="isAlwaysOnTop ? 'currentColor' : 'none'" />
     </button>
     <button @click="minimize"
+      v-if="showSystemButtons"
       class="inline-flex items-center justify-center h-full w-12 hover:bg-accent hover:text-accent-foreground transition-colors focus:outline-none"
       title="最小化">
       <Minus class="size-4" />
     </button>
     <button @click="toggleMaximize"
+      v-if="showSystemButtons"
       class="inline-flex items-center justify-center h-full w-12 hover:bg-accent hover:text-accent-foreground transition-colors focus:outline-none"
       :title="isMaximized ? '还原' : '最大化'">
       <Copy v-if="isMaximized" class="size-4 rotate-180" />
       <Square v-else class="size-4" />
     </button>
     <button @click="close"
+      v-if="showSystemButtons"
       class="inline-flex items-center justify-center h-full w-12 hover:bg-red-500 hover:text-white transition-colors focus:outline-none"
       title="关闭">
       <X class="size-4" />

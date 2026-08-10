@@ -149,10 +149,19 @@ pub async fn open_video_player_window(
 
     let builder = WebviewWindowBuilder::new(&app, window_label, url)
         .title("视频播放")
-        .decorations(false) // 这是一个无边框窗口
         .min_inner_size(400.0, 300.0)
         .always_on_top(vp_settings.always_on_top)
         .visible(false);
+
+    // macOS：使用系统原生窗口按钮（左上角交通灯），标题栏透明覆盖在视频上方
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true);
+
+    // 其他平台：无边框窗口，窗口按钮由前端自绘（右上角）
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.decorations(false);
 
     let window = builder.build().map_err(|e| e.to_string())?;
 

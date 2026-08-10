@@ -9,6 +9,7 @@ import { useRoute } from 'vue-router'
 import { computed } from 'vue'
 import { toast } from 'vue-sonner'
 import { useScanProgress } from '@/composables/useTauriEvents'
+import { isMacOS } from '@/lib/platform'
 
 const route = useRoute()
 
@@ -49,7 +50,7 @@ watch(scanProgress, (newProgress) => {
 <template>
   <SidebarProvider class="h-screen overflow-hidden">
     <AppSidebar />
-    <SidebarInset class="overflow-hidden">
+    <SidebarInset :class="isMacOS ? 'overflow-hidden peer-data-[state=collapsed]:[&>header]:pl-9' : 'overflow-hidden'">
       <!-- 顶部栏 -->
       <header class="flex h-9 shrink-0 items-center gap-2 border-b pl-4 pr-0" data-tauri-drag-region>
         <div class="flex items-center gap-2">
