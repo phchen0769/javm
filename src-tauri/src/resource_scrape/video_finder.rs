@@ -63,7 +63,7 @@ pub const DEFAULT_DOWNLOAD_SITES: &[DownloadSiteDef] = &[
     DownloadSiteDef { id: "jable", name: "Jable.tv", url_template: "https://jable.tv/videos/{code}/", fail_selector: "", fail_text: "" },
     DownloadSiteDef { id: "jptt", name: "JPTT.tv", url_template: "https://jptt.tv/video/{code}", fail_selector: "h1", fail_text: "404 Not Found" },
     DownloadSiteDef { id: "javsb", name: "Jav.sb", url_template: "https://jav.sb/jav/{code}-1-1.html", fail_selector: ".badge", fail_text: "404" },
-    DownloadSiteDef { id: "123av", name: "123AV", url_template: "https://123av.com/zh/v/{code}", fail_selector: ".errpage__code", fail_text: "404" },
+    DownloadSiteDef { id: "123av", name: "123AV", url_template: "https://123av.com/cn/v/{code}", fail_selector: ".errpage__code", fail_text: "404" },
     DownloadSiteDef { id: "myjav", name: "MyJav.tv", url_template: "https://cn.myjav.tv/video/{code}", fail_selector: "h1", fail_text: "404" },
     DownloadSiteDef { id: "javgg", name: "JavGG", url_template: "https://javgg.net/jav/{code}/", fail_selector: ".no-result", fail_text: "404" },
     DownloadSiteDef { id: "javct", name: "JavCT", url_template: "https://javct.net/v/{code}", fail_selector: ".page-404__title", fail_text: "404" },
