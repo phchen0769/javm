@@ -98,8 +98,7 @@ impl Source for JavGuru {
                         ""
                     ));
                 // 简单检查：slug 中番号后是否紧跟 "-mr" 等
-                let code_in_slug =
-                    slug_upper.find(&code_upper.replace('-', "-"));
+                let code_in_slug = slug_upper.find(code_upper.as_str());
                 let is_mr_variant = if let Some(pos) = code_in_slug {
                     let after = &slug_upper[pos + code_upper.len()..];
                     after.starts_with("-MR") || after.starts_with("-UNCENSORED")

@@ -1,6 +1,6 @@
 //! 123av.com 数据源解析器
 //!
-//! 详情页 URL：`https://123av.com/zh/v/{code}`
+//! 详情页 URL：`https://123av.com/cn/v/{code}`
 //!
 //! ### head meta 标签
 //! - og:image → 封面
@@ -33,7 +33,7 @@ impl Source for Av123 {
     }
 
     fn build_url(&self, code: &str) -> String {
-        format!("https://123av.com/zh/v/{}", code.to_lowercase())
+        format!("https://123av.com/cn/v/{}", code.to_lowercase())
     }
 
     fn parse(&self, html: &str, code: &str) -> Option<SearchResult> {
