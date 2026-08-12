@@ -87,7 +87,10 @@ fn resolve_artwork_paths(
 ///
 /// 每个视频的文件 `metadata` 与封面 `exists()` 校验合并到同一个并发任务里，
 /// 避免在 SQL 查询循环里逐行串行 stat（大库时是主列表加载的主要开销）。
-pub(crate) async fn enrich_videos_with_file_times(mut videos: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+pub(crate) async fn enrich_videos_with_file_times(
+    mut videos: Vec<serde_json::Value>,
+    cfg: Arc<crate::media::storage::MetadataStorageConfig>,
+) -> Vec<serde_json::Value> {
     let max_concurrency = std::thread::available_parallelism()
         .map(|parallelism| parallelism.get())
         .unwrap_or(4)
@@ -108,42 +111,51 @@ pub(crate) async fn enrich_videos_with_file_times(mut videos: Vec<serde_json::Va
         let thumb = video.get("thumb").and_then(|v| v.as_str()).map(str::to_owned);
         let fanart = video.get("fanart").and_then(|v| v.as_str()).map(str::to_owned);
         let cover_thumb = video.get("coverThumb").and_then(|v| v.as_str()).map(str::to_owned);
+        // 番号：独立目录模式下定位 <root>/<番号 标题>/ 需要
+        let local_id = video.get("localId").and_then(|v| v.as_str()).unwrap_or("").to_owned();
 
         let semaphore = Arc::clone(&semaphore);
+        let cfg = Arc::clone(&cfg);
         tasks.spawn(async move {
             let _permit = semaphore.acquire_owned().await.ok();
             let result = tokio::task::spawn_blocking(move || {
-                // 同一并发任务内完成：视频文件时间 + 图集存在性解析
+                // 同一并发任务内完成：视频文件时间 + 图集存在性 + 字幕探测
                 let metadata = std::fs::metadata(&video_path);
                 let artwork = resolve_artwork_paths(poster, thumb, fanart);
                 let cover_thumb = cover_thumb.filter(|p| {
                     let trimmed = p.trim();
                     !trimmed.is_empty() && std::path::Path::new(trimmed).exists()
                 });
-                (metadata, artwork, cover_thumb)
+                // 字幕：按落地目录约定（独立目录/视频同级）探测同名字幕文件
+                let (asset_dir, stem) =
+                    crate::media::storage::resolve_existing_asset_dir(&video_path, &local_id, &cfg);
+                let has_subtitle = dir_has_matching_subtitle(&asset_dir, &stem);
+                (metadata, artwork, cover_thumb, has_subtitle)
             })
             .await;
 
-            let (file_created_at, file_modified_at, artwork, cover_thumb) = match result {
-                Ok((Ok(metadata), artwork, cover_thumb)) => {
+            let (file_created_at, file_modified_at, artwork, cover_thumb, has_subtitle) = match result {
+                Ok((Ok(metadata), artwork, cover_thumb, has_subtitle)) => {
                     let file_modified_at = metadata.modified().ok().map(system_time_to_rfc3339);
                     let file_created_at = metadata
                         .created()
                         .ok()
                         .or_else(|| metadata.modified().ok())
                         .map(system_time_to_rfc3339);
-                    (file_created_at, file_modified_at, artwork, cover_thumb)
+                    (file_created_at, file_modified_at, artwork, cover_thumb, has_subtitle)
                 }
-                Ok((Err(_), artwork, cover_thumb)) => (None, None, artwork, cover_thumb),
-                Err(_) => (None, None, (None, None, None), None),
+                Ok((Err(_), artwork, cover_thumb, has_subtitle)) => {
+                    (None, None, artwork, cover_thumb, has_subtitle)
+                }
+                Err(_) => (None, None, (None, None, None), None, false),
             };
 
-            (index, file_created_at, file_modified_at, artwork, cover_thumb)
+            (index, file_created_at, file_modified_at, artwork, cover_thumb, has_subtitle)
         });
     }
 
     while let Some(result) = tasks.join_next().await {
-        let Ok((index, file_created_at, file_modified_at, (poster, thumb, fanart), cover_thumb)) = result else {
+        let Ok((index, file_created_at, file_modified_at, (poster, thumb, fanart), cover_thumb, has_subtitle)) = result else {
             continue;
         };
 
@@ -160,6 +172,7 @@ pub(crate) async fn enrich_videos_with_file_times(mut videos: Vec<serde_json::Va
         video.insert("thumb".to_string(), serde_json::to_value(thumb).unwrap_or(serde_json::Value::Null));
         video.insert("fanart".to_string(), serde_json::to_value(fanart).unwrap_or(serde_json::Value::Null));
         video.insert("coverThumb".to_string(), serde_json::to_value(cover_thumb).unwrap_or(serde_json::Value::Null));
+        video.insert("hasSubtitle".to_string(), serde_json::Value::Bool(has_subtitle));
     }
 
     videos.sort_by(|left, right| match (
@@ -243,6 +256,42 @@ fn is_matching_subtitle_file(video_path: &std::path::Path, candidate: &std::path
                     .next()
                     .is_some_and(is_subtitle_suffix_separator)
             })
+}
+
+/// 目录内是否存在与给定 stem 匹配的字幕文件（任意语言/扩展名）。
+///
+/// stem 由 `resolve_existing_asset_dir` 给出（跟随视频=视频文件名，独立目录=番号），
+/// 匹配规则与 `is_matching_subtitle_file` 一致（stem 相等或以「stem+分隔符」为前缀），
+/// 供视频列表「是否有字幕」标识使用。
+fn dir_has_matching_subtitle(dir: &std::path::Path, stem: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let stem_lower = stem.to_ascii_lowercase();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+            continue;
+        };
+        if !SUBTITLE_EXTENSIONS
+            .iter()
+            .any(|item| item.eq_ignore_ascii_case(extension))
+        {
+            continue;
+        }
+        let Some(candidate_stem) = path.file_stem().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let candidate_lower = candidate_stem.to_ascii_lowercase();
+        if candidate_lower == stem_lower
+            || candidate_lower
+                .strip_prefix(&stem_lower)
+                .is_some_and(|suffix| suffix.chars().next().is_some_and(is_subtitle_suffix_separator))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn delete_matching_subtitle_files(video_path: &std::path::Path) {

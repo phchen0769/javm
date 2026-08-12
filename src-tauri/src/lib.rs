@@ -358,6 +358,7 @@ pub fn run() {
             media::commands::save_captured_cover,
             media::commands::save_captured_thumbs,
             media::commands::resolve_video_preview_images,
+            media::commands::download_subtitle_for_video,
             media::commands::delete_thumb,
             media::commands::clear_thumbs,
             media::commands::probe_video_duration,

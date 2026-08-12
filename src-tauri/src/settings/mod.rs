@@ -42,6 +42,9 @@ pub struct MetadataSettings {
     /// 独立目录模式下的元数据根目录（绝对路径）
     #[serde(rename = "rootDir", default)]
     pub root_dir: String,
+    /// 匹配成功后自动从 subtitlecat 下载简体中文字幕（落地 `<视频名>.zh.srt`），默认开启
+    #[serde(rename = "autoDownloadSubtitle", default = "default_true")]
+    pub auto_download_subtitle: bool,
 }
 
 /// 元数据独立目录模式的标识值
@@ -56,6 +59,7 @@ impl Default for MetadataSettings {
         Self {
             storage_mode: default_metadata_storage_mode(),
             root_dir: String::new(),
+            auto_download_subtitle: true,
         }
     }
 }

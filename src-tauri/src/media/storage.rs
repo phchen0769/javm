@@ -326,6 +326,21 @@ pub async fn write_scraped_media(
         }
     };
 
+    // 5. 简体中文字幕（best-effort：按番号从 subtitlecat 下载 <stem>.zh.srt，失败不中断）
+    if settings.metadata.auto_download_subtitle && !metadata.local_id.trim().is_empty() {
+        match crate::media::subtitle::download_subtitle(&metadata.local_id, &dir, &stem).await {
+            Ok(Some(path)) => log::info!(
+                "[media] event=subtitle_done path={} saved={}",
+                video_path, path.display()
+            ),
+            Ok(None) => log::info!("[media] event=subtitle_not_found path={}", video_path),
+            Err(e) => {
+                log::warn!("[media] event=subtitle_download_failed path={} error={}", video_path, e);
+                errors.push(format!("字幕下载失败: {}", e));
+            }
+        }
+    }
+
     MediaWriteOutcome { artwork, cover_produced, nfo_saved, errors }
 }
 

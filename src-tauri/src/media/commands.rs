@@ -327,6 +327,35 @@ pub async fn resolve_video_preview_images(
     Ok(items)
 }
 
+/// 手动为单个视频下载简体中文字幕（subtitlecat）。
+///
+/// 落地目录与自动刮削流程一致：独立目录存在则落到 `<root>/<番号 标题>/`，否则视频同级。
+/// 返回落地路径；未找到简中字幕返回 `Ok(None)`（正常情况，非错误）。
+#[tauri::command]
+pub async fn download_subtitle_for_video(
+    app: AppHandle,
+    video_path: String,
+    local_id: Option<String>,
+) -> AppResult<Option<String>> {
+    if video_path.trim().is_empty() {
+        return Err(AppError::Business("视频路径为空".to_string()));
+    }
+    let local_id = local_id.unwrap_or_default();
+    if local_id.trim().is_empty() {
+        return Err(AppError::Business("番号为空，无法查询字幕".to_string()));
+    }
+
+    let settings = crate::settings::get_settings(app.clone()).await.unwrap_or_default();
+    let cfg = crate::media::storage::MetadataStorageConfig::from_settings(&settings);
+    let (asset_dir, stem) =
+        crate::media::storage::resolve_existing_asset_dir(&video_path, &local_id, &cfg);
+
+    let saved = crate::media::subtitle::download_subtitle(&local_id, &asset_dir, &stem)
+        .await
+        .map_err(AppError::Business)?;
+    Ok(saved.map(|path| path.to_string_lossy().to_string()))
+}
+
 /// 删除单个预览图文件
 #[tauri::command]
 pub async fn delete_thumb(db: State<'_, Database>, thumb_path: String) -> AppResult<()> {

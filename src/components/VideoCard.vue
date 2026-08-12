@@ -242,11 +242,17 @@ const onImgError = () => {
           <span :class="statusTextClass">{{ SCAN_STATUS_TEXT[video.scanStatus] }}</span>
         </Badge>
 
-        <!-- 无码标记 -->
-        <Badge v-if="video.isUncensored" variant="destructive"
-          class="absolute top-2 left-2 z-10 text-[10px] px-1.5 py-0">
-          无码
-        </Badge>
+        <!-- 左上角标记（无码 / 字幕），竖向堆叠避免重叠 -->
+        <div class="absolute top-2 left-2 z-10 flex flex-col items-start gap-1">
+          <Badge v-if="video.isUncensored" variant="destructive"
+            class="text-[10px] px-1.5 py-0">
+            无码
+          </Badge>
+          <Badge v-if="video.hasSubtitle" variant="secondary"
+            class="text-[10px] px-1.5 py-0 bg-amber-500/90 text-white border-transparent">
+            字幕
+          </Badge>
+        </div>
       </div>
     </ContextMenuTrigger>
 

@@ -32,6 +32,7 @@ export interface Video {
     coverWidth?: number // 封面宽度像素 (videos.cover_width)
     coverHeight?: number // 封面高度像素 (videos.cover_height)
     isUncensored?: boolean // 是否无码作品 (videos.is_uncensored)
+    hasSubtitle?: boolean // 是否存在同名字幕文件（后端实时探测，非 DB 列）
     fastHash?: string // 快速哈希值 (videos.fast_hash)
     resolution?: string // 分辨率 (videos.resolution)
     videoPath: string // 视频文件路径 (videos.video_path)

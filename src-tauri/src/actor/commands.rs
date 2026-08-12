@@ -126,6 +126,7 @@ async fn javbus_fetch_context(app: &AppHandle) -> (FetchOptions, ResourceSite) {
     let site = ResourceSite {
         id: "javbus".to_string(),
         name: "javbus".to_string(),
+        url: String::new(),
         enabled: true,
         avg_score: None,
         scrape_count: None,
@@ -840,6 +841,7 @@ pub async fn fetch_facet_works(
     let site = ResourceSite {
         id: "javbus".to_string(),
         name: "javbus".to_string(),
+        url: String::new(),
         enabled: true,
         avg_score: None,
         scrape_count: None,
@@ -1088,6 +1090,7 @@ pub async fn search_works_by_code(
     let site = ResourceSite {
         id: "javbus".to_string(),
         name: "javbus".to_string(),
+        url: String::new(),
         enabled: true,
         avg_score: None,
         scrape_count: None,

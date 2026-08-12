@@ -567,6 +567,7 @@ pub(crate) async fn scrape_and_fuse(
             .unwrap_or(ResourceSite {
                 id: source.name().to_string(),
                 name: source.name().to_string(),
+                url: String::new(),
                 enabled: true,
                 avg_score: None,
                 scrape_count: None,
@@ -1004,6 +1005,7 @@ pub async fn rs_search_resource(
             .unwrap_or(ResourceSite {
                 id: source.name().to_string(),
                 name: source.name().to_string(),
+                url: String::new(),
                 enabled: true,
                 avg_score: None,
                 scrape_count: None,

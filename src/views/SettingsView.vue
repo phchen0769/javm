@@ -376,6 +376,17 @@ const sortedDownloadSources = computed(() => {
   )
 })
 
+/** 从站点 URL 或含 {code} 的模板中提取用于展示的主页地址（scheme + host） */
+const displaySourceUrl = (u?: string): string => {
+  const raw = (u || '').trim()
+  if (!raw) return ''
+  try {
+    return new URL(raw).origin
+  } catch {
+    return raw
+  }
+}
+
 const toggleDownloadSource = (siteId: string, enabled: boolean) => {
   const sources = localSettings.value.download.sources || []
   const site = sources.find(s => s.id === siteId)
@@ -990,6 +1001,9 @@ watch(() => settingsStore.settings, async (newSettings) => {
                             成功 {{ site.successCount }} 次
                           </Badge>
                         </div>
+                        <p v-if="displaySourceUrl(site.urlTemplate)" class="mt-0.5 truncate text-xs text-muted-foreground">
+                          {{ displaySourceUrl(site.urlTemplate) }}
+                        </p>
                       </div>
                       <Switch :model-value="!!site.enabled"
                         @update:model-value="(v: boolean) => toggleDownloadSource(site.id, v)" />
@@ -1128,6 +1142,18 @@ watch(() => settingsStore.settings, async (newSettings) => {
                       </SelectItem>
                     </SelectContent>
                   </Select>
+                </div>
+
+                <Separator />
+
+                <!-- 自动下载字幕 -->
+                <div class="flex items-center justify-between gap-4">
+                  <div>
+                    <p class="font-medium">自动下载字幕</p>
+                    <p class="text-sm text-muted-foreground">匹配成功后自动按番号下载简体中文字幕（保存为 <视频名>.zh.srt，供 Jellyfin/Emby 识别）</p>
+                  </div>
+                  <Switch :model-value="settingsStore.settings.metadata?.autoDownloadSubtitle ?? true"
+                    @update:model-value="(v: boolean) => saveMetadata({ autoDownloadSubtitle: v })" />
                 </div>
 
                 <!-- 元数据根目录（仅独立目录模式） -->
@@ -1324,6 +1350,9 @@ watch(() => settingsStore.settings, async (newSettings) => {
                               {{ site.avgScore ?? 0 }}分
                             </Badge>
                           </div>
+                          <p v-if="displaySourceUrl(site.url)" class="mt-0.5 truncate text-xs text-muted-foreground">
+                            {{ displaySourceUrl(site.url) }}
+                          </p>
                           <p v-if="site.scrapeCount" class="mt-1 text-xs text-muted-foreground">
                             累计 {{ site.scrapeCount }} 次刮削
                           </p>

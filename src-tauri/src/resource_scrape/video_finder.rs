@@ -434,6 +434,7 @@ pub fn open_video_finder_webview(
     let resource_site = ResourceSite {
         id: site_id_string.clone(),
         name: site_id_string.clone(),
+        url: String::new(),
         enabled: true,
         avg_score: None,
         scrape_count: None,

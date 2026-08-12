@@ -59,7 +59,7 @@ bun run vb -- 1.2.3-beta.1     # 指定完整版本号
 - `download/` — 下载任务队列与并发控制（N_m3u8DL-RE 下载器）
 - `resource_scrape/` — 资源刮削、站点适配、任务队列
 - `scanner/` — 文件扫描与入库
-- `media/` — 媒体文件处理、截图、封面
+- `media/` — 媒体文件处理、截图、封面、字幕下载
 - `metatube/` — MetaTube sidecar 管理（聚合刮削源）
 - `actor/` — 演员信息抓取
 - `deep_link.rs` — 深度链接解析（`javm://download?url=...`）
@@ -88,6 +88,15 @@ bun run vb -- 1.2.3-beta.1     # 指定完整版本号
 - 队列管理器（`queue_manager.rs`）控制并发与重试
 - WebView 池（`fetcher.rs`）用于 JS 渲染站点
 - 反爬策略（`anti_block/`）：指纹客户端、CF 检测规避
+
+**字幕自动下载**
+- 位置：[src-tauri/src/media/subtitle.rs](src-tauri/src/media/subtitle.rs)
+- 匹配成功后按番号从 subtitlecat 下载简体中文字幕，落地 `<视频名>.zh.srt`（供 Jellyfin/Emby 等按 ISO 639 语言码识别）
+- 挂载点：`media::storage::write_scraped_media`（NFO 之后），三条刮削路径共用，best-effort，失败不中断主流程
+- 开关：`MetadataSettings.auto_download_subtitle`（默认开），设置页「元数据存储」卡片可切换
+- 手动下载：命令 `media::commands::download_subtitle_for_video`（视频详情页「更多」菜单触发）
+- 列表标识：`get_videos` 的 `enrich_videos_with_file_times` 阶段实时探测同名字幕文件，注入 `hasSubtitle`（非 DB 列），卡片/列表项显示「字幕」徽标
+- 搜索为模糊匹配，必须按番号严格过滤详情页，避免配错字幕
 
 **深度链接**
 - 协议：`javm://download?url=<...>&title=<...>`

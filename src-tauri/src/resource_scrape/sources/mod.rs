@@ -79,6 +79,9 @@ pub struct ResourceSite {
     pub id: String,
     /// 显示名称，如 "JavBus"
     pub name: String,
+    /// 站点主页 URL，用于设置界面展示（如 "https://www.javbus.com"）
+    #[serde(default)]
+    pub url: String,
     /// 是否启用
     pub enabled: bool,
     /// 累计平均丰富度得分（0-100），多次刮削结果加权平均
@@ -114,125 +117,36 @@ pub fn all_sources() -> Vec<Box<dyn Source>> {
 
 /// 返回默认资源网站配置列表
 pub fn default_sites() -> Vec<ResourceSite> {
-    vec![
-        ResourceSite {
-            id: "javbus".to_string(),
-            name: "数据源 1".to_string(),
+    // (id, 展示名, 站点主页 URL)。名称沿用"数据源 N"，URL 为各源真实主页（与 build_url 域名一致）。
+    const SITES: &[(&str, &str, &str)] = &[
+        ("javbus", "数据源 1", "https://www.javbus.com"),
+        ("javmenu", "数据源 2", "https://javmenu.com"),
+        ("javsb", "数据源 3", "https://jav.sb"),
+        ("javxx", "数据源 4", "https://javxx.to"),
+        ("javplace", "数据源 5", "https://jav.place"),
+        ("projectjav", "数据源 6", "https://projectjav.com"),
+        ("3xplanet", "数据源 7", "https://3xplanet.com"),
+        ("freejavbt", "数据源 8", "https://freejavbt.com"),
+        ("javlibrary", "数据源 9", "https://www.javlibrary.com"),
+        ("javguru", "数据源 10", "https://jav.guru"),
+        ("javtiful", "数据源 11", "https://javtiful.com"),
+        ("123av", "数据源 12", "https://123av.com"),
+        ("myjav", "数据源 13", "https://cn.myjav.tv"),
+        ("javgg", "数据源 14", "https://javgg.net"),
+        ("javmost", "数据源 15", "https://www.javmost.ws"),
+        ("sextb", "数据源 16", "https://sextb.net"),
+        ("avsox", "数据源 17（无码）", "https://avsox.click"),
+    ];
+
+    SITES
+        .iter()
+        .map(|(id, name, url)| ResourceSite {
+            id: id.to_string(),
+            name: name.to_string(),
+            url: url.to_string(),
             enabled: true,
             avg_score: None,
             scrape_count: None,
-        },
-        ResourceSite {
-            id: "javmenu".to_string(),
-            name: "数据源 2".to_string(),
-            enabled: true,
-            avg_score: None,
-            scrape_count: None,
-        },
-        ResourceSite {
-            id: "javsb".to_string(),
-            name: "数据源 3".to_string(),
-            enabled: true,
-            avg_score: None,
-            scrape_count: None,
-        },
-        ResourceSite {
-            id: "javxx".to_string(),
-            name: "数据源 4".to_string(),
-            enabled: true,
-            avg_score: None,
-            scrape_count: None,
-        },
-        ResourceSite {
-            id: "javplace".to_string(),
-            name: "数据源 5".to_string(),
-            enabled: true,
-            avg_score: None,
-            scrape_count: None,
-        },
-        ResourceSite {
-            id: "projectjav".to_string(),
-            name: "数据源 6".to_string(),
-            enabled: true,
-            avg_score: None,
-            scrape_count: None,
-        },
-        ResourceSite {
-            id: "3xplanet".to_string(),
-            name: "数据源 7".to_string(),
-            enabled: true,
-            avg_score: None,
-            scrape_count: None,
-        },
-        ResourceSite {
-            id: "freejavbt".to_string(),
-            name: "数据源 8".to_string(),
-            enabled: true,
-            avg_score: None,
-            scrape_count: None,
-        },
-        ResourceSite {
-            id: "javlibrary".to_string(),
-            name: "数据源 9".to_string(),
-            enabled: true,
-            avg_score: None,
-            scrape_count: None,
-        },
-        ResourceSite {
-            id: "javguru".to_string(),
-            name: "数据源 10".to_string(),
-            enabled: true,
-            avg_score: None,
-            scrape_count: None,
-        },
-        ResourceSite {
-            id: "javtiful".to_string(),
-            name: "数据源 11".to_string(),
-            enabled: true,
-            avg_score: None,
-            scrape_count: None,
-        },
-        ResourceSite {
-            id: "123av".to_string(),
-            name: "数据源 12".to_string(),
-            enabled: true,
-            avg_score: None,
-            scrape_count: None,
-        },
-        ResourceSite {
-            id: "myjav".to_string(),
-            name: "数据源 13".to_string(),
-            enabled: true,
-            avg_score: None,
-            scrape_count: None,
-        },
-        ResourceSite {
-            id: "javgg".to_string(),
-            name: "数据源 14".to_string(),
-            enabled: true,
-            avg_score: None,
-            scrape_count: None,
-        },
-        ResourceSite {
-            id: "javmost".to_string(),
-            name: "数据源 15".to_string(),
-            enabled: true,
-            avg_score: None,
-            scrape_count: None,
-        },
-        ResourceSite {
-            id: "sextb".to_string(),
-            name: "数据源 16".to_string(),
-            enabled: true,
-            avg_score: None,
-            scrape_count: None,
-        },
-        ResourceSite {
-            id: "avsox".to_string(),
-            name: "数据源 17（无码）".to_string(),
-            enabled: true,
-            avg_score: None,
-            scrape_count: None,
-        },
-    ]
+        })
+        .collect()
 }

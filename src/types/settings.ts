@@ -96,6 +96,7 @@ export interface DownloadSettings {
 export interface ResourceSite {
     id: string           // 网站标识（如 "javbus"）
     name: string         // 显示名称
+    url?: string         // 站点主页 URL（设置界面展示）
     enabled: boolean     // 是否启用
     /** 累计平均丰富度得分（0-100），多次刮削结果加权平均 */
     avgScore?: number
@@ -179,6 +180,7 @@ export type MetadataStorageMode = 'follow_video' | 'independent'
 export interface MetadataSettings {
     storageMode: MetadataStorageMode   // 存储模式
     rootDir: string                    // 独立目录模式下的元数据根目录
+    autoDownloadSubtitle: boolean      // 匹配成功后自动下载简体中文字幕
 }
 
 /** 完整应用设置 */
@@ -291,5 +293,6 @@ export const defaultSettings: AppSettings = {
     metadata: {
         storageMode: 'follow_video',
         rootDir: '',
+        autoDownloadSubtitle: true,
     },
 }

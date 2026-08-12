@@ -43,7 +43,8 @@ import {
     ShieldAlert,
     Link as LinkIcon,
     ChevronDown,
-    Search
+    Search,
+    Captions
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import type { Video } from '@/types'
@@ -93,6 +94,7 @@ const isScraping = ref(false)
 const hasScrapedData = ref(false) // 标记是否刮削了新数据
 const aiRecognizing = ref(false) // AI识别番号状态
 const probingDuration = ref(false) // 探测时长状态
+const downloadingSubtitle = ref(false) // 下载字幕状态
 const captureCoverDialogOpen = ref(false) // 截取封面对话框状态
 const imageFetchDialogOpen = ref(false) // 获取封面/截图(DMM)对话框状态
 const captureThumbsDialogOpen = ref(false) // 截取预览图对话框状态
@@ -420,6 +422,39 @@ const probeDuration = async () => {
         toast.error('探测时长失败: ' + String(e))
     } finally {
         probingDuration.value = false
+    }
+}
+
+/** 按番号从 subtitlecat 下载简体中文字幕（落地视频/元数据目录，供播放器识别） */
+const downloadSubtitle = async () => {
+    if (!props.video || downloadingSubtitle.value) return
+    const videoPath = currentVideoPath.value
+    if (!videoPath) {
+        toast.error('视频路径为空')
+        return
+    }
+    const localId = formData.value.localId?.trim() || props.video.localId?.trim()
+    if (!localId) {
+        toast.error('番号为空，无法查询字幕')
+        return
+    }
+    downloadingSubtitle.value = true
+    try {
+        const saved = await invoke<string | null>('download_subtitle_for_video', {
+            videoPath,
+            localId,
+        })
+        if (saved) {
+            videoStore.updateVideo(props.video.id, { hasSubtitle: true })
+            toast.success('字幕下载成功')
+        } else {
+            toast.warning('未找到该番号的简体中文字幕')
+        }
+    } catch (e) {
+        console.error('下载字幕失败:', e)
+        toast.error('下载字幕失败: ' + String(e))
+    } finally {
+        downloadingSubtitle.value = false
     }
 }
 
@@ -1332,6 +1367,11 @@ const downloadLongScreenshot = async () => {
                                 <DropdownMenuItem @click="handleOpenDir">
                                     <FolderOpen class="mr-2 size-4" />
                                     打开目录
+                                </DropdownMenuItem>
+                                <DropdownMenuItem :disabled="downloadingSubtitle" @select.prevent="downloadSubtitle">
+                                    <Loader2 v-if="downloadingSubtitle" class="mr-2 size-4 animate-spin" />
+                                    <Captions v-else class="mr-2 size-4" />
+                                    {{ downloadingSubtitle ? '下载字幕中...' : '下载字幕' }}
                                 </DropdownMenuItem>
                                 <DropdownMenuItem @click="handleDeleteClick"
                                     class="text-destructive focus:text-destructive">

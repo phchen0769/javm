@@ -105,7 +105,10 @@ pub async fn delete_directory(db: State<'_, crate::db::Database>, id: String) ->
 // ==================== 视频管理 ====================
 
 #[tauri::command]
-pub async fn get_videos(db: State<'_, crate::db::Database>) -> AppResult<Vec<serde_json::Value>> {
+pub async fn get_videos(
+    app: AppHandle,
+    db: State<'_, crate::db::Database>,
+) -> AppResult<Vec<serde_json::Value>> {
     let conn = db.get_connection()?;
 
     let videos = tokio::task::spawn_blocking(move || -> AppResult<Vec<serde_json::Value>> {
@@ -253,7 +256,11 @@ pub async fn get_videos(db: State<'_, crate::db::Database>) -> AppResult<Vec<ser
     .await
     .map_err(|e| AppError::TaskJoin(e.to_string()))??;
 
-    Ok(enrich_videos_with_file_times(videos).await)
+    // 落地配置：字幕探测需据此决定探测目录（独立目录 / 视频同级）
+    let settings = crate::settings::get_settings(app.clone()).await.unwrap_or_default();
+    let cfg = std::sync::Arc::new(crate::media::storage::MetadataStorageConfig::from_settings(&settings));
+
+    Ok(enrich_videos_with_file_times(videos, cfg).await)
 }
 
 /// 获取演员列表（含头像与本地作品数），供「发现」页演员分面显示头像。
