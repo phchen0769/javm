@@ -868,6 +868,9 @@ mod tests {
         // FC2-PPV 番号后接裸数字分段（用户实际场景）
         assert_eq!(parse_stack_part("FC2-PPV-2458342-1"), Some(("FC2-PPV-2458342".into(), 1)));
         assert_eq!(parse_stack_part("FC2-PPV-2458342-2"), Some(("FC2-PPV-2458342".into(), 2)));
+        // 标准番号后接裸数字（含前导零），两段应归并到同一基名
+        assert_eq!(parse_stack_part("STARS-818-01"), Some(("STARS-818".into(), 1)));
+        assert_eq!(parse_stack_part("STARS-818-02"), Some(("STARS-818".into(), 2)));
         // 其他分隔符与前导零
         assert_eq!(parse_stack_part("ABC-123-2"), Some(("ABC-123".into(), 2)));
         assert_eq!(parse_stack_part("ABC-123_2"), Some(("ABC-123".into(), 2)));
@@ -879,6 +882,8 @@ mod tests {
         assert_eq!(parse_stack_part("010120-001"), None);
         // 无分段的完整 FC2 番号（数字段过长，不会被当作分段序号）
         assert_eq!(parse_stack_part("FC2-PPV-2458342"), None);
+        // 无分段的完整标准番号（单连字符，不折叠）
+        assert_eq!(parse_stack_part("STARS-818"), None);
     }
 
     #[test]
