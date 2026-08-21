@@ -131,6 +131,9 @@ pub struct ExistingVideoScanInfo {
     pub fanart: Option<String>,
     /// 已记录的扫描状态（2=已刮削），用于扫描时不回退独立目录模式已刮削项
     pub scan_status: i32,
+    /// 已记录的分段归并键与段序号，用于扫描时自愈历史分段误判（规则更新后重新归并）
+    pub stack_key: Option<String>,
+    pub part_index: Option<i64>,
 }
 
 pub struct VideoScrapeUpdateData<'a> {

@@ -422,6 +422,19 @@ impl ScannerService {
                     Database::update_video_scan_status(tx, &existing_info.id, 2)
                         .map_err(|e| format!("更新扫描状态失败 '{}': {}", path_str, e))?;
                 }
+                // 自愈历史分段误判：分段识别规则更新后重算归并键，与库内记录不一致时刷新
+                // （如新规则把 FC2-PPV-2458342-2 认作分段），使存量文件无需内容变更即可折叠成多集。
+                if existing_info.stack_key.as_deref() != stack_key.as_deref()
+                    || existing_info.part_index != part_index
+                {
+                    Database::update_video_stack(
+                        tx,
+                        &existing_info.id,
+                        stack_key.as_deref(),
+                        part_index,
+                    )
+                    .map_err(|e| format!("更新分段归并键失败 '{}': {}", path_str, e))?;
+                }
                 // 文件没变且确实无任何封面（含库内独立目录记录）才派发截帧
                 if !has_any_cover {
                     if let Some(sender) = cover_tx {

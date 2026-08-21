@@ -171,6 +171,14 @@ static STACK_NUM_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
 static STACK_LETTER_RE: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"(?i)^(.*\d)[\s._-]?([abd])$").unwrap());
 
+/// 分段文件名解析：番号后接**裸数字**分段（无 part/cd 等单位后缀），如 `FC2-PPV-2458342-2`。
+/// 基名（组 1）须**含连字符且以数字结尾**（形如完整番号，如 `FC2-PPV-2458342`），分段序号 1-3 位（组 2）。
+/// 靠「基名必含连字符」这一约束，避免把普通番号（`ABC-123` 基名 `ABC` 无连字符）
+/// 或纯数字番号（`123456-789` 基名 `123456` 无连字符）的数字段误判为分段。
+static STACK_BARE_NUM_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"(?i)^(.*-\d+)[\s._-]0*(\d{1,3})(?:部|集|話|话)?$").unwrap()
+});
+
 /// 已知无码厂牌前缀（番号本身即无码作品）。纯数字前缀（加勒比/一本道/天然むすめ/帕高等）
 /// 另行按"前缀全为数字"判定，不在此列。
 static UNCENSORED_PREFIXES: &[&str] = &[
@@ -202,7 +210,8 @@ pub fn is_uncensored_designation(designation: &str) -> bool {
 /// 解析分段/分卷文件名，返回 `(去后缀基名<大写归一>, 分段序号)`。
 ///
 /// 用于同目录多文件归并（stacking）：`SSIS-724Part002` → `("SSIS-724", 2)`。
-/// 仅识别明确的分段后缀（part/pt/cd/disc/vol/分卷/第N部）与结尾单字母 A/B/D；
+/// 识别三类分段：明确分段后缀（part/pt/cd/disc/vol/分卷/第N部）、结尾单字母 A/B/D、
+/// 以及番号后接裸数字（`FC2-PPV-2458342-2` → `("FC2-PPV-2458342", 2)`，基名须含连字符防误拆）；
 /// **不认中文字幕标记 C**，避免把「原版 + 中文字幕版」误并成分段。
 /// 入参为不含扩展名的文件名（file stem）。基名为空或无后缀时返回 `None`。
 pub fn parse_stack_part(file_stem: &str) -> Option<(String, i64)> {
@@ -234,6 +243,17 @@ pub fn parse_stack_part(file_stem: &str) -> Option<(String, i64)> {
         };
         if !base.is_empty() {
             return Some((base, idx));
+        }
+    }
+
+    // 番号后接裸数字分段（无单位词），如 FC2-PPV-2458342-2 → ("FC2-PPV-2458342", 2)。
+    // 放在最后作兜底：显式单位词/字母后缀优先，裸数字歧义最大，仅在基名含连字符时才认。
+    if let Some(cap) = STACK_BARE_NUM_RE.captures(s) {
+        let base = strip_base(&cap[1]);
+        if let Ok(idx) = cap[2].parse::<i64>() {
+            if !base.is_empty() && idx >= 1 {
+                return Some((base, idx));
+            }
         }
     }
 
@@ -841,6 +861,24 @@ mod tests {
         assert_eq!(parse_stack_part("SSIS-001B"), Some(("SSIS-001".into(), 2)));
         // C 是中文字幕标记，不算分段
         assert_eq!(parse_stack_part("SSIS-001C"), None);
+    }
+
+    #[test]
+    fn parse_stack_part_recognizes_bare_trailing_number() {
+        // FC2-PPV 番号后接裸数字分段（用户实际场景）
+        assert_eq!(parse_stack_part("FC2-PPV-2458342-1"), Some(("FC2-PPV-2458342".into(), 1)));
+        assert_eq!(parse_stack_part("FC2-PPV-2458342-2"), Some(("FC2-PPV-2458342".into(), 2)));
+        // 其他分隔符与前导零
+        assert_eq!(parse_stack_part("ABC-123-2"), Some(("ABC-123".into(), 2)));
+        assert_eq!(parse_stack_part("ABC-123_2"), Some(("ABC-123".into(), 2)));
+        assert_eq!(parse_stack_part("ABC-123-02"), Some(("ABC-123".into(), 2)));
+        // 不含连字符的纯番号/纯数字番号不应被裸数字规则误拆
+        assert_eq!(parse_stack_part("ABC-123"), None);
+        assert_eq!(parse_stack_part("SSIS-001"), None);
+        assert_eq!(parse_stack_part("123456-789"), None);
+        assert_eq!(parse_stack_part("010120-001"), None);
+        // 无分段的完整 FC2 番号（数字段过长，不会被当作分段序号）
+        assert_eq!(parse_stack_part("FC2-PPV-2458342"), None);
     }
 
     #[test]

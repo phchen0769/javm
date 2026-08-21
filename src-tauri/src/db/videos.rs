@@ -147,7 +147,7 @@ impl Database {
                 video_path, id, title, original_title, studio, premiered, director,
                 local_id, rating, file_size, fast_hash, duration, resolution,
                 file_mtime, nfo_mtime, poster_mtime, thumb_mtime, fanart_mtime,
-                poster, thumb, fanart, scan_status
+                poster, thumb, fanart, scan_status, stack_key, part_index
             FROM videos
             WHERE dir_path LIKE ? || '%'"
         )?;
@@ -176,6 +176,8 @@ impl Database {
                     thumb: row.get(19)?,
                     fanart: row.get(20)?,
                     scan_status: row.get::<_, Option<i32>>(21)?.unwrap_or(1),
+                    stack_key: row.get(22)?,
+                    part_index: row.get(23)?,
                 },
             ))
         })?;
@@ -420,6 +422,20 @@ impl Database {
         conn.execute(
             "UPDATE videos SET scan_status = ?, updated_at = datetime('now') WHERE id = ?",
             params![scan_status, video_id],
+        )?;
+        Ok(())
+    }
+
+    /// 仅更新分段归并键与段序号（扫描时自愈历史分段误判用，避免全量 update_video 的开销）
+    pub fn update_video_stack(
+        conn: &rusqlite::Transaction,
+        video_id: &str,
+        stack_key: Option<&str>,
+        part_index: Option<i64>,
+    ) -> Result<()> {
+        conn.execute(
+            "UPDATE videos SET stack_key = ?, part_index = ?, updated_at = datetime('now') WHERE id = ?",
+            params![stack_key, part_index, video_id],
         )?;
         Ok(())
     }

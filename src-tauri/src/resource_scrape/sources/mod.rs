@@ -4,6 +4,7 @@
 //! 以及数据源注册和默认网站配置函数。
 
 pub mod av123;
+pub mod avgood;
 pub mod avsox;
 pub mod common;
 pub mod freejavbt;
@@ -112,6 +113,7 @@ pub fn all_sources() -> Vec<Box<dyn Source>> {
         Box::new(javmost::JavMost),
         Box::new(sextb::SexTB),
         Box::new(avsox::Avsox),
+        Box::new(avgood::AvGood),
     ]
 }
 
@@ -136,6 +138,7 @@ pub fn default_sites() -> Vec<ResourceSite> {
         ("javmost", "数据源 15", "https://www.javmost.ws"),
         ("sextb", "数据源 16", "https://sextb.net"),
         ("avsox", "数据源 17（无码）", "https://avsox.click"),
+        ("avgood", "数据源 18", "https://avgood.com"),
     ];
 
     SITES
