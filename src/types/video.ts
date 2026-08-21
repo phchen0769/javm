@@ -1,5 +1,14 @@
 // 视频相关类型定义
 
+/** 分段影片的单个分段（同一影片切分成多文件时，后端 get_videos 折叠后附于代表卡） */
+export interface VideoPart {
+    videoPath: string // 该段文件路径
+    partIndex: number // 段序号（1 起）
+    duration?: number // 该段时长(秒)
+    fileSize?: number // 该段文件大小(字节)
+    title?: string // 该段标题
+}
+
 /** 视频扫描状态 */
 export enum ScanStatus {
     /** 待识别 */
@@ -47,6 +56,8 @@ export interface Video {
     fileModifiedAt?: string // 文件修改时间
     updatedAt: string // 更新时间 (videos.updated_at)
     scrapedAt?: string // 刮削时间 (videos.scraped_at)
+    parts?: VideoPart[] // 分段列表（多分段影片折叠后由后端注入，按段序号排序）
+    partCount?: number // 分段总数（>1 表示为多分段影片）
 }
 
 /** 视频过滤条件 */

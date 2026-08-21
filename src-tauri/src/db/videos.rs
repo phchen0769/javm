@@ -264,7 +264,9 @@ impl Database {
                 poster_mtime = ?19,
                 thumb_mtime = ?20,
                 fanart_mtime = ?21,
-                scan_status = ?22
+                scan_status = ?22,
+                stack_key = ?23,
+                part_index = ?24
             WHERE video_path = ?1",
             params![
                 data.path_str,
@@ -288,7 +290,9 @@ impl Database {
                 data.poster_mtime,
                 data.thumb_mtime,
                 data.fanart_mtime,
-                data.scan_status
+                data.scan_status,
+                data.stack_key,
+                data.part_index
             ],
         )?;
         Ok(())
@@ -302,8 +306,8 @@ impl Database {
                 file_size, fast_hash, created_at, updated_at, scan_status,
                 duration, resolution, rating, poster, thumb, fanart,
                 file_mtime, nfo_mtime, poster_mtime, thumb_mtime, fanart_mtime,
-                cover_width, cover_height
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+                cover_width, cover_height, stack_key, part_index
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
             params![
                 data.id,
                 data.local_id,
@@ -330,7 +334,9 @@ impl Database {
                 data.thumb_mtime,
                 data.fanart_mtime,
                 data.cover_width,
-                data.cover_height
+                data.cover_height,
+                data.stack_key,
+                data.part_index
             ],
         )?;
         Ok(())

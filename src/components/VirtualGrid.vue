@@ -4,9 +4,10 @@ import { useRouter } from 'vue-router'
 import { useElementSize } from '@vueuse/core'
 import VideoCard from './VideoCard.vue'
 import VideoListItem from './VideoListItem.vue'
+import PartPickerDialog from './PartPickerDialog.vue'
 import type { Video } from '@/types'
 import type { ViewMode } from '@/types/settings'
-import { openWithPlayer, openVideoPlayerWindow } from '@/lib/tauri'
+import { openWithPlayer, openVideoPlayerWindow, openVideoPlaylistWindow } from '@/lib/tauri'
 import { useSettingsStore } from '@/stores/settings'
 import { COVER_LAYOUTS, WATERFALL_ROW_HEIGHT, WATERFALL_NO_COVER_WIDTH } from '@/utils/constants'
 import { hasCoverImage, galleryCoverRatio } from '@/utils/image'
@@ -184,11 +185,33 @@ const handleScrape = (video: Video) => {
   emit('scrape', video)
 }
 
+// 分段选择弹窗（系统播放器模式下多分段影片手动选段播放）
+const partPickerOpen = ref(false)
+const partPickerVideo = ref<Video | null>(null)
+
 // 处理播放
 const handleVideoPlay = async (video: Video) => {
   try {
     const settingsStore = useSettingsStore()
     const isSoftware = settingsStore.settings.general.playMethod === 'software'
+    const parts = video.parts ?? []
+    const isMultiPart = (video.partCount ?? 1) > 1 && parts.length > 1
+
+    if (isMultiPart) {
+      if (isSoftware) {
+        // 内置播放器：顺序连播全部分段
+        await openVideoPlaylistWindow(
+          parts.map(p => p.videoPath),
+          video.title || video.originalTitle || 'Unknown Video',
+        )
+      } else {
+        // 系统播放器无法控制连播，弹分段选择由用户手动逐段播放
+        partPickerVideo.value = video
+        partPickerOpen.value = true
+      }
+      return
+    }
+
     if (isSoftware) {
       await openVideoPlayerWindow(video.videoPath, video.title || video.originalTitle || 'Unknown Video', false)
     } else {
@@ -196,6 +219,15 @@ const handleVideoPlay = async (video: Video) => {
     }
   } catch (e) {
     console.error('Failed to play video:', e)
+  }
+}
+
+// 分段选择弹窗选中某段 → 用系统播放器打开该段
+const handlePlayPart = async (path: string) => {
+  try {
+    await openWithPlayer(path)
+  } catch (e) {
+    console.error('Failed to play part:', e)
   }
 }
 
@@ -339,6 +371,9 @@ defineExpose({
         </div>
       </template>
     </div>
+
+    <!-- 系统播放器模式下多分段影片的分段选择弹窗 -->
+    <PartPickerDialog v-model:open="partPickerOpen" :video="partPickerVideo" @play="handlePlayPart" />
   </div>
 </template>
 

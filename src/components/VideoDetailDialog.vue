@@ -48,7 +48,7 @@ import {
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import type { Video } from '@/types'
-import { openInExplorer, openWithPlayer, updateVideo, openVideoPlayerWindow } from '@/lib/tauri'
+import { openInExplorer, openWithPlayer, updateVideo, openVideoPlayerWindow, openVideoPlaylistWindow } from '@/lib/tauri'
 import { useVideoStore } from '@/stores'
 import { useResourceScrapeStore } from '@/stores/resourceScrape'
 import { useSettingsStore } from '@/stores/settings'
@@ -148,6 +148,14 @@ const isOpen = computed({
 const currentVideoPath = computed(() => formData.value.videoPath || props.video?.videoPath || '')
 // 缺失作品（发现页合成卡）没有本地文件：播放/打开目录/删除/保存均无意义，屏蔽这些按钮
 const hasLocalFile = computed(() => !!props.video?.id && !!currentVideoPath.value)
+
+// 分段影片：parts 按段序号排序，isMultiPart 表示需要分段 UI 与顺序连播
+const parts = computed(() =>
+    [...(props.video?.parts ?? [])].sort((a, b) => (a.partIndex ?? 0) - (b.partIndex ?? 0)),
+)
+const isMultiPart = computed(() => (props.video?.partCount ?? 1) > 1 && parts.value.length > 1)
+// 分段文件名（去路径），兼容 Windows / POSIX 分隔符
+const partFileName = (path: string) => path.split(/[\\/]/).pop() || path
 
 const normalizedTitle = computed(() => (formData.value.title || '').trim())
 
@@ -462,15 +470,36 @@ const handlePlay = async () => {
     if (props.video) {
         try {
             const isSoftware = settingsStore.settings.general.playMethod === 'software'
-            if (isSoftware) {
+            if (isMultiPart.value && isSoftware) {
+                // 内置播放器：顺序连播全部分段
+                await openVideoPlaylistWindow(
+                    parts.value.map(p => p.videoPath),
+                    props.video.title || props.video.originalTitle || 'Unknown Video',
+                )
+            } else if (isSoftware) {
                 await openVideoPlayerWindow(currentVideoPath.value, props.video.title || props.video.originalTitle || 'Unknown Video', false)
             } else {
-                await openWithPlayer(currentVideoPath.value)
+                // 系统播放器：多分段时播放第 1 段（其余段可在下方分段列表逐段播放）
+                await openWithPlayer(isMultiPart.value ? parts.value[0].videoPath : currentVideoPath.value)
             }
         } catch (e) {
             console.error('Failed to play video:', e)
         }
         // isOpen.value = false // Keep dialog open
+    }
+}
+
+// 播放指定分段（遵循当前播放器设置）
+const handlePlayPart = async (path: string) => {
+    try {
+        const isSoftware = settingsStore.settings.general.playMethod === 'software'
+        if (isSoftware) {
+            await openVideoPlayerWindow(path, props.video?.title || props.video?.originalTitle || 'Unknown Video', false)
+        } else {
+            await openWithPlayer(path)
+        }
+    } catch (e) {
+        console.error('Failed to play part:', e)
     }
 }
 
@@ -1332,6 +1361,28 @@ const downloadLongScreenshot = async () => {
                                 </div>
                             </div>
 
+                            <!-- 分段列表（多分段影片）：逐段播放，遵循当前播放器设置 -->
+                            <div v-if="isMultiPart" class="space-y-1.5 pt-3 border-t">
+                                <Label class="text-xs text-muted-foreground">分段（共 {{ parts.length }} 段）</Label>
+                                <div class="flex flex-col gap-1">
+                                    <button
+                                        v-for="part in parts"
+                                        :key="part.videoPath"
+                                        type="button"
+                                        class="flex items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-muted transition-colors"
+                                        @click="handlePlayPart(part.videoPath)"
+                                    >
+                                        <span class="flex size-5 shrink-0 items-center justify-center rounded-full bg-indigo-500/90 text-white text-[10px]">
+                                            {{ part.partIndex }}
+                                        </span>
+                                        <span class="flex-1 truncate text-xs" :title="part.videoPath">
+                                            {{ partFileName(part.videoPath) }}
+                                        </span>
+                                        <Play class="size-3.5 shrink-0 text-muted-foreground" />
+                                    </button>
+                                </div>
+                            </div>
+
                             <!-- 磁力链接 -->
                             <div class="pt-3 border-t">
                                 <MagnetList :code="formData.localId" />
@@ -1415,7 +1466,7 @@ const downloadLongScreenshot = async () => {
 
                         <Button v-if="hasLocalFile" size="sm" @click="handlePlay">
                             <Play class="mr-2 size-4" fill="currentColor" />
-                            播放
+                            {{ isMultiPart ? '顺序播放' : '播放' }}
                         </Button>
                         </div>
                     </div>

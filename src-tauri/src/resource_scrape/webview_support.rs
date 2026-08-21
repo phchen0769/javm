@@ -496,7 +496,7 @@ pub fn build_anti_detection_script() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_anti_detection_script, WEBVIEW_BROWSER_ARGS};
+    use super::build_anti_detection_script;
 
     #[test]
     fn anti_detection_script_covers_high_signal_fingerprints() {
@@ -520,6 +520,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn browser_args_disable_additional_webview2_signals() {
+        use super::WEBVIEW_BROWSER_ARGS;
         assert!(WEBVIEW_BROWSER_ARGS.contains("AutomationControlled"));
         assert!(WEBVIEW_BROWSER_ARGS.contains("CalculateNativeWinOcclusion"));
         assert!(WEBVIEW_BROWSER_ARGS.contains("disable-renderer-backgrounding"));

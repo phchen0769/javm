@@ -71,6 +71,8 @@ pub struct VideoUpdateData<'a> {
     pub thumb_mtime: Option<i64>,
     pub fanart_mtime: Option<i64>,
     pub scan_status: i32,
+    pub stack_key: Option<&'a str>,
+    pub part_index: Option<i64>,
     pub now: &'a str,
 }
 
@@ -101,6 +103,8 @@ pub struct VideoInsertData<'a> {
     pub fanart_mtime: Option<i64>,
     pub cover_width: Option<i32>,
     pub cover_height: Option<i32>,
+    pub stack_key: Option<&'a str>,
+    pub part_index: Option<i64>,
 }
 
 pub struct ExistingVideoScanInfo {

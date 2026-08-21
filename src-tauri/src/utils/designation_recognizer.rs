@@ -154,9 +154,22 @@ static UC_RE: std::sync::LazyLock<Regex> =
 /// 流出（英文 token）
 static LEAK_RE: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"(?i)(?:^|[^a-z])(?:leaked|leak)(?:[^a-z]|$)").unwrap());
-/// 多碟标记 CD1 / DISC2
+/// 多碟/分段标记 CD1 / DISC2 / PART003 / PT2 / VOL2（组 1=单位，组 2=序号）
 static CD_RE: std::sync::LazyLock<Regex> =
-    std::sync::LazyLock::new(|| Regex::new(r"(?i)^(?:cd|disc)(\d{1,2})$").unwrap());
+    std::sync::LazyLock::new(|| Regex::new(r"(?i)^(cd|disc|part|pt|vol)0*(\d{1,3})$").unwrap());
+
+/// 分段文件名解析：结尾数字型分段后缀（part/pt/cd/disc/vol/分卷/第N部）。
+/// 分段标记前须为**数字**（分支 1，如 `724Part2`）或**分隔符**（分支 2，如 `-CD2`），
+/// 否则会把番号前缀里的字母子串（如 `ABCD-123` 的 `CD`）误判为分段。
+/// 两分支的基名分别落在捕获组 1 / 2，序号固定在组 3。
+static STACK_NUM_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:(.*\d)[\s._-]*(?:part|pt|cd|disc|vol|分卷|第)|(.*?)[\s._-]+(?:part|pt|cd|disc|vol|分卷|第))[\s._-]*0*(\d{1,3})(?:部|集|話|话)?$").unwrap()
+});
+
+/// 分段文件名解析：结尾单字母 A/B/D（C 留给中文字幕，避免把字幕版误并为分段）。
+/// 字母前须为数字，避免吃掉普通单词结尾。
+static STACK_LETTER_RE: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"(?i)^(.*\d)[\s._-]?([abd])$").unwrap());
 
 /// 已知无码厂牌前缀（番号本身即无码作品）。纯数字前缀（加勒比/一本道/天然むすめ/帕高等）
 /// 另行按"前缀全为数字"判定，不在此列。
@@ -184,6 +197,47 @@ pub fn is_uncensored_designation(designation: &str) -> bool {
         return true;
     }
     UNCENSORED_PREFIXES.contains(&prefix)
+}
+
+/// 解析分段/分卷文件名，返回 `(去后缀基名<大写归一>, 分段序号)`。
+///
+/// 用于同目录多文件归并（stacking）：`SSIS-724Part002` → `("SSIS-724", 2)`。
+/// 仅识别明确的分段后缀（part/pt/cd/disc/vol/分卷/第N部）与结尾单字母 A/B/D；
+/// **不认中文字幕标记 C**，避免把「原版 + 中文字幕版」误并成分段。
+/// 入参为不含扩展名的文件名（file stem）。基名为空或无后缀时返回 `None`。
+pub fn parse_stack_part(file_stem: &str) -> Option<(String, i64)> {
+    let s = file_stem.trim();
+
+    let strip_base = |base: &str| -> String {
+        base.trim_end_matches(|c: char| matches!(c, ' ' | '.' | '_' | '-'))
+            .trim()
+            .to_uppercase()
+    };
+
+    if let Some(cap) = STACK_NUM_RE.captures(s) {
+        let base_raw = cap.get(1).or_else(|| cap.get(2)).map_or("", |m| m.as_str());
+        let base = strip_base(base_raw);
+        if let Ok(idx) = cap[3].parse::<i64>() {
+            if !base.is_empty() && idx >= 1 {
+                return Some((base, idx));
+            }
+        }
+    }
+
+    if let Some(cap) = STACK_LETTER_RE.captures(s) {
+        let base = strip_base(&cap[1]);
+        let idx = match cap[2].to_ascii_uppercase().as_str() {
+            "A" => 1,
+            "B" => 2,
+            "D" => 4,
+            _ => return None,
+        };
+        if !base.is_empty() {
+            return Some((base, idx));
+        }
+    }
+
+    None
 }
 
 /// 提取语义标记。
@@ -242,7 +296,7 @@ fn extract_markers(title: &str, suffix_start: Option<usize>, designation: &str) 
                     "leak" | "leaked" => m.leaked = true,
                     _ => {
                         if let Some(cap) = CD_RE.captures(&tl) {
-                            m.part = Some(format!("CD{}", &cap[1]));
+                            m.part = Some(format!("{}{}", cap[1].to_uppercase(), &cap[2]));
                         }
                     }
                 }
@@ -760,5 +814,55 @@ mod tests {
         assert!(info.markers.part.is_none(), "空格后的冠词 a 不应被当成分片");
         // 紧邻后缀字母仍正确
         assert_eq!(r.recognize_detailed("SSIS-001A.mp4").unwrap().markers.part.as_deref(), Some("A"));
+    }
+
+    // ============ 分段解析（stacking）============
+
+    #[test]
+    fn parse_stack_part_recognizes_numeric_suffixes() {
+        // 用户实际场景：PartNNN（含前导零）
+        assert_eq!(parse_stack_part("SSIS-724Part002"), Some(("SSIS-724".into(), 2)));
+        assert_eq!(parse_stack_part("SSIS-724Part001"), Some(("SSIS-724".into(), 1)));
+        assert_eq!(parse_stack_part("SSIS-724Part003"), Some(("SSIS-724".into(), 3)));
+        // 各种分隔符与单位
+        assert_eq!(parse_stack_part("ABC-123-CD2"), Some(("ABC-123".into(), 2)));
+        assert_eq!(parse_stack_part("ABC-123.disc1"), Some(("ABC-123".into(), 1)));
+        assert_eq!(parse_stack_part("ABC-123 part 3"), Some(("ABC-123".into(), 3)));
+        assert_eq!(parse_stack_part("ABC-123_pt2"), Some(("ABC-123".into(), 2)));
+        assert_eq!(parse_stack_part("ABC-123 VOL.2"), Some(("ABC-123".into(), 2)));
+        // 中文
+        assert_eq!(parse_stack_part("ABC-123分卷2"), Some(("ABC-123".into(), 2)));
+        assert_eq!(parse_stack_part("ABC-123第3部"), Some(("ABC-123".into(), 3)));
+    }
+
+    #[test]
+    fn parse_stack_part_recognizes_trailing_letters() {
+        assert_eq!(parse_stack_part("SSIS-001A"), Some(("SSIS-001".into(), 1)));
+        assert_eq!(parse_stack_part("SSIS-001B"), Some(("SSIS-001".into(), 2)));
+        // C 是中文字幕标记，不算分段
+        assert_eq!(parse_stack_part("SSIS-001C"), None);
+    }
+
+    #[test]
+    fn parse_stack_part_ignores_non_stack_names() {
+        // 纯番号无分段后缀
+        assert_eq!(parse_stack_part("SSIS-724"), None);
+        assert_eq!(parse_stack_part("300MAAN-783"), None);
+        assert_eq!(parse_stack_part("FC2-PPV-1234567"), None);
+        // "cd" 恰在词中但其后非分段序号
+        assert_eq!(parse_stack_part("ABCD-123"), None);
+        // "pt" 贴在字母词尾（无分隔符）不应误判
+        assert_eq!(parse_stack_part("SCRIPT3"), None);
+    }
+
+    #[test]
+    fn parse_stack_part_groups_same_base() {
+        // 三段应归并到同一基名，序号各异
+        let a = parse_stack_part("SSIS-724Part001").unwrap();
+        let b = parse_stack_part("SSIS-724Part002").unwrap();
+        let c = parse_stack_part("SSIS-724Part003").unwrap();
+        assert_eq!(a.0, b.0);
+        assert_eq!(b.0, c.0);
+        assert_eq!((a.1, b.1, c.1), (1, 2, 3));
     }
 }

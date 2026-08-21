@@ -104,6 +104,86 @@ pub async fn delete_directory(db: State<'_, crate::db::Database>, id: String) ->
 
 // ==================== 视频管理 ====================
 
+/// 将同一影片的分段文件折叠为单张代表卡。
+///
+/// 按 `(dirPath, stackKey)` 分组，组员 ≥2 时：取段序号（`partIndex`）最小者为代表，
+/// 为其注入 `parts`（各段 videoPath/partIndex/duration/fileSize/title，按序号排序）、
+/// `partCount`，并把 `duration` 覆盖为各段总时长；其余段从列表移除。
+/// `stackKey` 为空或组员仅 1 的视频原样保留（无 `parts`/`partCount`）。
+fn fold_video_stacks(videos: &mut Vec<serde_json::Value>) {
+    use std::collections::HashMap;
+
+    // 分组：key = (dirPath, stackKey) → 组员在 videos 中的下标
+    let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    for (idx, v) in videos.iter().enumerate() {
+        if let (Some(dir), Some(key)) = (
+            v.get("dirPath").and_then(|x| x.as_str()),
+            v.get("stackKey").and_then(|x| x.as_str()),
+        ) {
+            if !key.is_empty() {
+                groups.entry((dir.to_string(), key.to_string())).or_default().push(idx);
+            }
+        }
+    }
+
+    let part_index_of = |v: &serde_json::Value| v.get("partIndex").and_then(|x| x.as_i64()).unwrap_or(i64::MAX);
+
+    let mut drop_indices: Vec<usize> = Vec::new();
+    // (代表下标, parts 数组, 总时长, 段数)
+    let mut rep_updates: Vec<(usize, serde_json::Value, i64, i64)> = Vec::new();
+
+    for (_, mut members) in groups {
+        if members.len() < 2 {
+            continue;
+        }
+        // 按 (段序号, videoPath) 排序，确保代表与 parts 顺序稳定
+        members.sort_by(|&a, &b| {
+            part_index_of(&videos[a]).cmp(&part_index_of(&videos[b])).then_with(|| {
+                let va = videos[a].get("videoPath").and_then(|x| x.as_str()).unwrap_or("");
+                let vb = videos[b].get("videoPath").and_then(|x| x.as_str()).unwrap_or("");
+                va.cmp(vb)
+            })
+        });
+
+        let mut parts = Vec::with_capacity(members.len());
+        let mut total_duration = 0i64;
+        for &m in &members {
+            total_duration += videos[m].get("duration").and_then(|x| x.as_i64()).unwrap_or(0);
+            parts.push(serde_json::json!({
+                "videoPath": videos[m].get("videoPath").cloned().unwrap_or(serde_json::Value::Null),
+                "partIndex": videos[m].get("partIndex").cloned().unwrap_or(serde_json::Value::Null),
+                "duration": videos[m].get("duration").cloned().unwrap_or(serde_json::Value::Null),
+                "fileSize": videos[m].get("fileSize").cloned().unwrap_or(serde_json::Value::Null),
+                "title": videos[m].get("title").cloned().unwrap_or(serde_json::Value::Null),
+            }));
+        }
+
+        let count = members.len() as i64;
+        drop_indices.extend_from_slice(&members[1..]);
+        rep_updates.push((members[0], serde_json::Value::Array(parts), total_duration, count));
+    }
+
+    // 先写代表行（此时不再持有 groups 对 videos 的借用）
+    for (rep, parts, total_duration, count) in rep_updates {
+        if let Some(obj) = videos[rep].as_object_mut() {
+            obj.insert("parts".to_string(), parts);
+            obj.insert("partCount".to_string(), serde_json::json!(count));
+            obj.insert("duration".to_string(), serde_json::json!(total_duration));
+        }
+    }
+
+    // 移除被折叠的非代表段
+    if !drop_indices.is_empty() {
+        let drop_set: std::collections::HashSet<usize> = drop_indices.into_iter().collect();
+        let mut idx = 0usize;
+        videos.retain(|_| {
+            let keep = !drop_set.contains(&idx);
+            idx += 1;
+            keep
+        });
+    }
+}
+
 #[tauri::command]
 pub async fn get_videos(
     app: AppHandle,
@@ -154,7 +234,9 @@ pub async fn get_videos(
                 v.cover_width,
                 v.cover_height,
                 v.is_uncensored,
-                v.cover_thumb
+                v.cover_thumb,
+                v.stack_key,
+                v.part_index
             FROM videos v
         "#;
         // 注意：不在 SQL 里排序，最终顺序由 enrich_videos_with_file_times 按文件
@@ -199,6 +281,9 @@ pub async fn get_videos(
                     "isUncensored": row.get::<_, Option<i64>>(23)?.unwrap_or(0) != 0,
                     // 原始缩略图路径，存在性解析同样挪到 enrich 并发阶段
                     "coverThumb": cover_thumb,
+                    // 分段归并键（去后缀基名）与段序号，仅用于下方 (dirPath, stackKey) 折叠
+                    "stackKey": row.get::<_, Option<String>>(25)?,
+                    "partIndex": row.get::<_, Option<i64>>(26)?,
                 }))
             })?;
 
@@ -250,6 +335,11 @@ pub async fn get_videos(
                 })
                 .unwrap_or(false)
         });
+
+        // 分段折叠：同 (dirPath, stackKey) 且组员 ≥2 的文件合并为一张代表卡，
+        // 代表取段序号最小者，附 parts 列表与 partCount，duration 汇总为总时长；
+        // 其余段从列表移除。单文件或 stackKey 为空者原样保留。
+        fold_video_stacks(&mut videos);
 
         Ok(videos)
     })
@@ -435,7 +525,14 @@ pub async fn get_duplicate_videos(db: State<'_, crate::db::Database>) -> AppResu
                 SELECT fast_hash FROM videos WHERE fast_hash IS NOT NULL AND fast_hash != '' GROUP BY fast_hash HAVING COUNT(*) > 1
             ))
             OR (v.local_id IS NOT NULL AND v.local_id != '' AND v.local_id IN (
-                SELECT local_id FROM videos WHERE local_id IS NOT NULL AND local_id != '' GROUP BY local_id HAVING COUNT(*) > 1
+                -- 同番号重复：把同一 (dir_path, stack_key) 分段组折成 1 份再计数，
+                -- 避免把同一影片的多个分段（共享番号）误报为可删重复。
+                SELECT local_id FROM (
+                    SELECT local_id
+                    FROM videos
+                    WHERE local_id IS NOT NULL AND local_id != ''
+                    GROUP BY local_id, dir_path, COALESCE(stack_key, video_path)
+                ) GROUP BY local_id HAVING COUNT(*) > 1
             ))
             ORDER BY v.local_id, v.fast_hash, v.created_at DESC
         "#;
@@ -696,15 +793,15 @@ pub async fn update_video(app: AppHandle, db: State<'_, crate::db::Database>, id
             updated_actors.as_deref(),
             updated_tags.as_deref(),
         );
-        let mut final_video_path = current.video_path.clone();
-        let mut final_dir_path = current.dir_path.clone().or_else(|| {
+        let final_video_path = current.video_path.clone();
+        let final_dir_path = current.dir_path.clone().or_else(|| {
             std::path::Path::new(&current.video_path)
                 .parent()
                 .map(|path| path.to_string_lossy().to_string())
         });
-        let mut final_poster = current.poster.clone();
-        let mut final_thumb = current.thumb.clone();
-        let mut final_fanart = current.fanart.clone();
+        let final_poster = current.poster.clone();
+        let final_thumb = current.thumb.clone();
+        let final_fanart = current.fanart.clone();
 
         let tx = conn.transaction()?;
 
@@ -807,32 +904,8 @@ pub async fn update_video(app: AppHandle, db: State<'_, crate::db::Database>, id
             )?;
         }
 
-        if let Some(title) = &title_to_store {
-            if let Some(relocated) = crate::media::assets::rename_video_assets_with_title(
-                &final_video_path,
-                title,
-                final_poster.as_deref(),
-                final_thumb.as_deref(),
-                final_fanart.as_deref(),
-            ).map_err(|e| AppError::Business(e))? {
-                final_video_path = relocated.video_path;
-                final_dir_path = Some(relocated.dir_path);
-                final_poster = relocated.poster;
-                final_thumb = relocated.thumb;
-                final_fanart = relocated.fanart;
-
-                crate::db::Database::update_video_file_location_tx(
-                    &tx,
-                    &id,
-                    &relocated.original_video_path,
-                    &final_video_path,
-                    final_dir_path.as_deref().unwrap_or_default(),
-                    final_poster.as_deref(),
-                    final_thumb.as_deref(),
-                    final_fanart.as_deref(),
-                )?;
-            }
-        }
+        // 详情页保存不再按标题重命名视频文件：保持磁盘上现有文件名（通常为番号），
+        // 仅更新数据库字段与 NFO 内容。（刮削保存仍按各自逻辑处理文件名）
 
         // 独立目录模式：视频被重命名/移动时，同步对应番号的 .strm 指向新路径
         if final_video_path != current.video_path {

@@ -247,6 +247,8 @@ impl Database {
                 cover_height INTEGER,
                 is_uncensored INTEGER DEFAULT 0,
                 cover_thumb TEXT,
+                stack_key TEXT,
+                part_index INTEGER,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 scraped_at TEXT
@@ -261,6 +263,9 @@ impl Database {
         let _ = conn.execute("ALTER TABLE videos ADD COLUMN is_uncensored INTEGER DEFAULT 0", []);
         // 兼容旧库：补网格缩略图列（媒体库网格快速解码用的小尺寸横版缩略图路径，回填生成）。
         let _ = conn.execute("ALTER TABLE videos ADD COLUMN cover_thumb TEXT", []);
+        // 兼容旧库：补分段归并列（同一影片切分成多文件时，stack_key=去分段后缀基名，part_index=段序号）。
+        let _ = conn.execute("ALTER TABLE videos ADD COLUMN stack_key TEXT", []);
+        let _ = conn.execute("ALTER TABLE videos ADD COLUMN part_index INTEGER", []);
         log::info!("[db] event=create_videos_table_succeeded");
 
         // 3. 关联表

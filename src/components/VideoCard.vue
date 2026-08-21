@@ -252,6 +252,10 @@ const onImgError = () => {
             class="text-[10px] px-1.5 py-0 bg-amber-500/90 text-white border-transparent">
             字幕
           </Badge>
+          <Badge v-if="(video.partCount ?? 1) > 1" variant="secondary"
+            class="text-[10px] px-1.5 py-0 bg-indigo-500/90 text-white border-transparent">
+            共 {{ video.partCount }} 段
+          </Badge>
         </div>
       </div>
     </ContextMenuTrigger>

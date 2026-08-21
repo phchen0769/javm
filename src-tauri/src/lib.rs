@@ -98,6 +98,17 @@ async fn open_video_player_window(
 }
 
 #[tauri::command]
+async fn open_video_playlist_window(
+    app: AppHandle,
+    paths: Vec<String>,
+    title: String,
+) -> Result<(), String> {
+    utils::system_commands::open_video_playlist_window(app.clone(), paths, title).await?;
+    analytics::record_play_video(&app);
+    Ok(())
+}
+
+#[tauri::command]
 async fn proxy_hls_request(
     url: String,
     referer: Option<String>,
@@ -318,6 +329,7 @@ pub fn run() {
             open_with_player,
             get_local_file_size,
             open_video_player_window,
+            open_video_playlist_window,
             proxy_hls_request,
             // 视频 + 目录
             video::commands::get_videos,

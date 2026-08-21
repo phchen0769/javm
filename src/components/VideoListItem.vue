@@ -125,6 +125,7 @@ const onImgError = () => { imgError.value = true }
             </Badge>
             <Badge v-if="video.isUncensored" variant="destructive" class="shrink-0 text-[10px] h-5">无码</Badge>
             <Badge v-if="video.hasSubtitle" variant="secondary" class="shrink-0 text-[10px] h-5 bg-amber-500/90 text-white border-transparent">字幕</Badge>
+            <Badge v-if="(video.partCount ?? 1) > 1" variant="secondary" class="shrink-0 text-[10px] h-5 bg-indigo-500/90 text-white border-transparent">共 {{ video.partCount }} 段</Badge>
           </div>
           <div class="flex items-center gap-3 mt-1 text-xs text-muted-foreground">
             <span v-if="video.localId" class="font-mono bg-muted px-1 rounded">{{ video.localId }}</span>

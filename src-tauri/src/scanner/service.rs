@@ -340,6 +340,14 @@ impl ScannerService {
             return Ok(false);
         }
 
+        // 分段/分卷识别（纯文件名推导，与番号/NFO 无关）：仅有分段后缀的文件写入 stack_key
+        // （去后缀归一基名）与 part_index（段序号）；列表按 (dir_path, stack_key) 折叠成一张卡。
+        let (stack_key, part_index) =
+            match crate::utils::designation_recognizer::parse_stack_part(&filename) {
+                Some((base, idx)) => (Some(base), Some(idx)),
+                None => (None, None),
+            };
+
         let file_metadata = file_path
             .metadata()
             .map_err(|e| format!("获取文件元数据失败 '{}': {}", path_str, e))?;
@@ -556,6 +564,8 @@ impl ScannerService {
                 thumb_mtime,
                 fanart_mtime,
                 scan_status,
+                stack_key: stack_key.as_deref(),
+                part_index,
                 now: &now,
             };
             Database::update_video(tx, &data)
@@ -594,6 +604,8 @@ impl ScannerService {
                 fanart_mtime,
                 cover_width,
                 cover_height,
+                stack_key: stack_key.as_deref(),
+                part_index,
             };
             Database::insert_video(tx, &data)
                 .map_err(|e| format!("插入视频记录失败 '{}': {}", path_str, e))?;

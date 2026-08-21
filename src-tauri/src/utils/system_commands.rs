@@ -129,8 +129,6 @@ pub async fn open_video_player_window(
         return open_with_player(video_url).await;
     }
 
-    let window_label = format!("video_player_{}", Uuid::new_v4().simple());
-
     // 使用 url crate 的 query_pairs_mut 对参数进行编码
     let mut temp_url = url::Url::parse("http://x/video-player").unwrap();
     temp_url.query_pairs_mut()
@@ -139,6 +137,38 @@ pub async fn open_video_player_window(
         .append_pair("is_hls", &is_hls.to_string());
     let url_str = format!("/video-player?{}", temp_url.query().unwrap_or_default());
 
+    spawn_player_window(app, url_str).await
+}
+
+/// 打开内置播放器并载入分段播放列表（播完自动续下一段）。列表 ≤1 条时回退单文件播放。
+/// `paths` 为本地文件原始路径，前端自行 `convertFileSrc`。
+pub async fn open_video_playlist_window(
+    app: AppHandle,
+    paths: Vec<String>,
+    title: String,
+) -> Result<(), String> {
+    if paths.len() <= 1 {
+        let single = paths.into_iter().next().unwrap_or_default();
+        return open_video_player_window(app, single, title, false).await;
+    }
+
+    let playlist_json = serde_json::to_string(&paths).map_err(|e| e.to_string())?;
+
+    let mut temp_url = url::Url::parse("http://x/video-player").unwrap();
+    temp_url.query_pairs_mut()
+        .append_pair("url", &paths[0])
+        .append_pair("title", &title)
+        .append_pair("is_hls", "false")
+        .append_pair("playlist", &playlist_json)
+        .append_pair("index", "0");
+    let url_str = format!("/video-player?{}", temp_url.query().unwrap_or_default());
+
+    spawn_player_window(app, url_str).await
+}
+
+/// 依据 `/video-player?...` 相对路径创建播放器窗口（含尺寸/位置/置顶等设置恢复）。
+async fn spawn_player_window(app: AppHandle, url_str: String) -> Result<(), String> {
+    let window_label = format!("video_player_{}", Uuid::new_v4().simple());
     let url = WebviewUrl::App(url_str.into());
 
     use crate::settings::get_settings;

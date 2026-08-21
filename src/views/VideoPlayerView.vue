@@ -79,6 +79,37 @@ const isTsFile = ref(false)
 const originalUrl = ref('')
 const playbackError = ref('')
 
+// 分段播放列表（多分段影片顺序连播）。playlist 为本地文件原始路径数组。
+const playlist = ref<string[]>([])
+const currentIndex = ref(0)
+const baseTitle = ref('')
+
+const updateTitle = () => {
+    videoTitle.value = playlist.value.length > 1
+        ? `${baseTitle.value}（${currentIndex.value + 1}/${playlist.value.length}）`
+        : baseTitle.value
+    document.title = videoTitle.value
+}
+
+// 载入指定分段（仅用于本地分段列表）：切源、更新标题并重建播放引擎
+const loadPart = (i: number) => {
+    currentIndex.value = i
+    const path = playlist.value[i]
+    originalUrl.value = path
+    videoUrl.value = convertFileSrc(path)
+    isHls.value = false
+    isTsFile.value = /\.(m2ts|ts)$/i.test(path)
+    updateTitle()
+    initPlayer()
+}
+
+// 当前段播放结束 → 自动播放下一段（已是最后一段则不动作）
+const advanceToNext = () => {
+    if (playlist.value.length > 1 && currentIndex.value < playlist.value.length - 1) {
+        loadPart(currentIndex.value + 1)
+    }
+}
+
 onMounted(async () => {
     document.addEventListener('keydown', handleKeyDown, true)
     const queryUrl = route.query.url as string || ''
@@ -87,9 +118,22 @@ onMounted(async () => {
     const decodedUrl = decodeURIComponent(queryUrl)
     const isRemoteUrl = decodedUrl.startsWith('http://') || decodedUrl.startsWith('https://')
 
-    videoTitle.value = decodeURIComponent(queryTitle)
-    document.title = videoTitle.value
+    baseTitle.value = decodeURIComponent(queryTitle)
     originalUrl.value = decodeURIComponent(queryUrl)
+
+    // 解析分段播放列表（后端 open_video_playlist_window 注入）；单条/缺失则退化为普通单文件播放
+    const queryPlaylist = route.query.playlist as string || ''
+    if (queryPlaylist) {
+        try {
+            const arr = JSON.parse(queryPlaylist)
+            if (Array.isArray(arr) && arr.length > 1) {
+                playlist.value = arr.map(String)
+                const parsed = parseInt(route.query.index as string || '0', 10) || 0
+                currentIndex.value = Math.min(Math.max(parsed, 0), playlist.value.length - 1)
+            }
+        } catch { /* 播放列表格式异常时忽略，按单文件处理 */ }
+    }
+    updateTitle()
 
     if (queryIsHls || isRemoteUrl) {
         videoUrl.value = decodedUrl
@@ -113,6 +157,8 @@ onMounted(async () => {
     }
 
     if (videoElement.value) {
+        // 分段连播：当前段结束自动切下一段
+        videoElement.value.addEventListener('ended', advanceToNext)
         initPlayer()
     }
 
@@ -350,6 +396,9 @@ const openInExternalPlayer = async () => {
 
 onUnmounted(() => {
     document.removeEventListener('keydown', handleKeyDown, true)
+    if (videoElement.value) {
+        videoElement.value.removeEventListener('ended', advanceToNext)
+    }
     destroyPlaybackEngines()
     if (unlistenResize) {
         unlistenResize()

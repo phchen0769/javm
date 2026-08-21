@@ -32,7 +32,20 @@
       "Bash(ls -d /Users/fedorov/.cargo/registry/src/*/tauri-2* 2>/dev/null | grep -vE \"tauri-\\(utils|build|runtime|macros|codegen|plugin|winres\\)\" | head; echo \"---\"; ls -d /Users/fedorov/.cargo/registry/src/*/ 2>/dev/null | head)",
       "Read(//Users/fedorov/.cargo/registry/src/**)",
       "Read(//Users/fedorov/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-2.11.5/src/webview/**)",
-      "Read(//Users/fedorov/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-2.11.5/src/**)"
+      "Read(//Users/fedorov/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-2.11.5/src/**)",
+      "Read(//Users/fedorov/Documents/GitHub/worker/src-tauri/**)",
+      "Read(//Users/fedorov/Documents/GitHub/worker/src-tauri/src/**)",
+      "Bash(cd /Users/fedorov/Documents/GitHub/worker && grep -rniE \"subtitle|字幕|\\\\.srt|\\\\.vtt|\\\\.ass|subtitles\" --include=*.rs --include=*.ts --include=*.vue --include=*.js -l src-tauri/src/ src/ 2>/dev/null | head -50)",
+      "Read(//Users/fedorov/Documents/GitHub/**)",
+      "Bash(ls -la /Users/fedorov/Documents/GitHub/ 2>/dev/null; echo \"---\"; ls -la /Users/fedorov/Documents/GitHub/javm/ 2>/dev/null | head -40)",
+      "Bash(ls -la /Users/fedorov/Documents/GitHub/ 2>/dev/null | head -60)",
+      "Bash(grep -nE \"pub \\(async \\)?fn movie_info_to_search_result|pub async fn movie|pub async fn get_movie\" /Users/fedorov/Documents/GitHub/javm/src-tauri/src/metatube/client.rs; echo \"---\"; sed -n '/fn movie_info_to_search_result/,/^}/p' /Users/fedorov/Documents/GitHub/javm/src-tauri/src/metatube/client.rs)",
+      "WebSearch",
+      "WebFetch(domain:www.subtitlecat.com)",
+      "WebFetch(domain:assrt.net)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:gist.github.com)",
+      "Bash(curl -sS -m 20 -A \"Mozilla/5.0 \\(Macintosh; Intel Mac OS X 10_15_7\\) AppleWebKit/537.36 \\(KHTML, like Gecko\\) Chrome/120.0 Safari/537.36\" \"https://www.subtitlecat.com/index.php?search=SSIS-001\" -o /tmp/sc_search.html -w \"HTTP=%{http_code} SIZE=%{size_download} URL=%{url_effective}\\\\n\")"
     ],
     "deny": [
       "Bash(git reset --hard *)",
@@ -40,6 +53,9 @@
       "Bash(git push -f *)",
       "Bash(git clean *)",
       "Bash(rm -rf *)"
+    ],
+    "additionalDirectories": [
+      "/Users/fedorov/Documents/GitHub/javm/src-tauri/src/metatube"
     ]
   }
 }

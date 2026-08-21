@@ -432,5 +432,10 @@ export async function openVideoPlayerWindow(videoUrl: string, title: string, isH
     return tauriInvoke('open_video_player_window', { videoUrl, title, isHls })
 }
 
+/** 打开内置播放器窗口并载入分段播放列表（顺序连播） */
+export async function openVideoPlaylistWindow(paths: string[], title: string): Promise<void> {
+    return tauriInvoke('open_video_playlist_window', { paths, title })
+}
+
 
 
