@@ -410,4 +410,17 @@ impl Database {
         )
         .optional()
     }
+
+    /// 仅更新扫描状态（扫描时自愈历史误判用，避免全量 update_video 的开销）
+    pub fn update_video_scan_status(
+        conn: &rusqlite::Transaction,
+        video_id: &str,
+        scan_status: i32,
+    ) -> Result<()> {
+        conn.execute(
+            "UPDATE videos SET scan_status = ?, updated_at = datetime('now') WHERE id = ?",
+            params![scan_status, video_id],
+        )?;
+        Ok(())
+    }
 }

@@ -422,6 +422,7 @@ pub fn run() {
             resource_scrape::commands::get_resource_sites,
             resource_scrape::commands::rs_scrape_save,
             resource_scrape::commands::rs_get_scrape_tasks,
+            resource_scrape::commands::rs_get_task_diagnostics,
             resource_scrape::commands::rs_create_filtered_scrape_tasks,
             resource_scrape::commands::rs_start_task_queue,
             resource_scrape::commands::rs_stop_task_queue,

@@ -551,6 +551,7 @@ async fn perform_scrape(app: &tauri::AppHandle, video_path: &str) -> Result<(), 
     let search_result =
         crate::resource_scrape::commands::scrape_and_fuse(app, &designation, &scrape_cancel)
             .await?
+            .result
             .ok_or_else(|| format!("未找到该番号的信息: {}", designation))?;
 
     log::info!(

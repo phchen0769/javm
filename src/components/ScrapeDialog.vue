@@ -23,8 +23,6 @@ import { toImageSrc } from '@/utils/image'
 // 引入 resourceScrape store，使用新架构的搜索方法
 const scrapeStore = useResourceScrapeStore()
 
-const isDev = import.meta.env.DEV
-
 const open = ref(false)
 const originalTitle = ref('')
 const localId = ref('')
@@ -332,7 +330,7 @@ defineExpose({
               <div class="min-w-0 flex-1">
                 <div class="text-xs font-medium truncate">{{ item.code }}</div>
                 <div class="text-[10px] text-muted-foreground truncate">{{ item.title }}</div>
-                <div v-if="isDev" class="text-[10px] text-muted-foreground">{{ item.source ?? '未知来源' }}</div>
+                <div class="text-[10px] text-muted-foreground truncate">{{ item.source ?? '未知来源' }}</div>
               </div>
             </div>
             <!-- 加载中 -->

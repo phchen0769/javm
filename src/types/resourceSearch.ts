@@ -27,3 +27,19 @@ export interface DataSource {
   buildUrl: (code: string) => string            // URL 构建函数
   parse: (html: string) => ResourceItem | null  // HTML 解析函数
 }
+
+/** 单个刮削源的执行诊断（信息来自哪个网址、是否有效） */
+export interface SourceDiagnostic {
+  source: string        // 源 id（与设置里的站点 id 对应，便于关闭）
+  siteName: string      // 真实站点名
+  url: string           // 命中详情页地址（成功时）或站点主页
+  status: 'success' | 'empty' | 'failed' | 'timeout'  // 成功/无数据/失败/太慢
+  error?: string        // 失败原因（status=failed 时有值）
+  elapsedMs: number     // 耗时（毫秒）
+}
+
+/** 融合刮削响应：最佳结果 + 各源诊断 */
+export interface FusedScrapeResult {
+  result: ResourceItem | null
+  diagnostics: SourceDiagnostic[]
+}

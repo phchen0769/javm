@@ -13,7 +13,7 @@ use crate::db::{Database, ScrapeStatus};
 use crate::resource_scrape::database_writer::DatabaseWriter;
 use crate::resource_scrape::detector::ScrapedVideoDetector;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 
 /// 任务队列管理器
@@ -292,10 +292,19 @@ impl TaskQueueManager {
 
         // 步骤 2: 多源抓取 + 字段级融合，产出比单源更完整的最佳元数据（无选择列表 → 自动融合）
         let scrape_cancel = tokio_util::sync::CancellationToken::new();
-        let search_result =
-            super::commands::scrape_and_fuse(&self.app, &designation, &scrape_cancel)
-                .await?
-                .ok_or_else(|| format!("未找到该番号的信息: {}", designation))?;
+        let fusion =
+            super::commands::scrape_and_fuse(&self.app, &designation, &scrape_cancel).await?;
+        // 记录各源诊断到全局状态，供批量页逐任务展开查看（无结果也记，便于看出全员失败/超时）
+        if let Some(state) = self.app.try_state::<super::commands::RsTaskQueueState>() {
+            state
+                .diagnostics
+                .lock()
+                .await
+                .insert(task_id.to_string(), fusion.diagnostics);
+        }
+        let search_result = fusion
+            .result
+            .ok_or_else(|| format!("未找到该番号的信息: {}", designation))?;
 
         log::info!(
             "[scrape_queue] event=fused_succeeded task_id={} title={}",

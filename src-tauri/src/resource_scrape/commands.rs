@@ -384,7 +384,14 @@ fn associate_search_evidence(
 
 // ==================== 字段级跨源融合（无选择列表的自动刮削路径用） ====================
 
-/// 抓取并解析单个源 → `SearchResult`（含 detail_score）。失败/无效返回 None。
+/// 单源抓取结果，用于诊断区分：成功 / 无有效数据 / 抓取失败。
+enum SourceFetchOutcome {
+    Success(SearchResult),
+    Empty,
+    Failed(String),
+}
+
+/// 抓取并解析单个源 → [`SourceFetchOutcome`]（区分成功/无数据/失败，供诊断展示）。
 async fn fetch_and_parse_source(
     app: &AppHandle,
     source: &dyn Source,
@@ -393,10 +400,13 @@ async fn fetch_and_parse_source(
     fetch_options: super::fetcher::FetchOptions,
     preferred_cover_type: &str,
     cancel: &CancellationToken,
-) -> Option<SearchResult> {
+) -> SourceFetchOutcome {
     let fetcher = Fetcher::new();
     let url = source.build_url(code);
-    let html = fetcher.fetch(app, &url, site, fetch_options, cancel).await.ok()?;
+    let html = match fetcher.fetch(app, &url, site, fetch_options, cancel).await {
+        Ok(h) => h,
+        Err(e) => return SourceFetchOutcome::Failed(format!("{}", e)),
+    };
 
     let (parse_html, final_url) = match source.extract_detail_url(&html, code) {
         Some(detail) => {
@@ -417,14 +427,17 @@ async fn fetch_and_parse_source(
         None => (html, url.clone()),
     };
 
-    let mut result = source.parse(&parse_html, code)?;
+    let mut result = match source.parse(&parse_html, code) {
+        Some(r) => r,
+        None => return SourceFetchOutcome::Empty,
+    };
     if !is_valid_search_result(&result) {
-        return None;
+        return SourceFetchOutcome::Empty;
     }
     result.page_url = final_url.clone();
     normalize_search_result_urls(&mut result, &final_url);
     enrich_search_result_detail(&mut result, preferred_cover_type);
-    Some(result)
+    SourceFetchOutcome::Success(result)
 }
 
 /// MetaTube 最优结果（就绪才有，best-effort），加入融合池。
@@ -467,20 +480,33 @@ const FUSED_FIRST_GRACE: std::time::Duration = std::time::Duration::from_millis(
 /// 绝对超时：再慢也不超过这个时间就用已有结果融合返回
 const FUSED_HARD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
 
+/// 融合刮削产物：最佳结果 + 各源诊断（用于前端展示信息来源/识别无效源）。
+pub(crate) struct ScrapeFusionOutcome {
+    pub result: Option<SearchResult>,
+    pub diagnostics: Vec<SourceDiagnostic>,
+}
+
+/// 单源任务回传消息：源 id + 抓取结果 + 耗时（毫秒）。
+struct SourceMessage {
+    source_id: String,
+    outcome: SourceFetchOutcome,
+    elapsed_ms: u64,
+}
+
 /// 多源抓取 + 字段融合：按评分取前 N 个启用源（+ MetaTube 最优）**并发**抓取，**提前返回**
 /// （首个结果 + 短暂收集窗口），融合成一条最佳结果。慢源在后台跑完（自行关闭 WebView），结果丢弃。
 /// 供无选择列表的路径（详情刮削 / 批量 / 下载后自动）自动产出最佳元数据；远程图片 URL 不代理，
-/// 由调用方按需下载/代理。
+/// 由调用方按需下载/代理。同时产出各源诊断（成功/无数据/失败/太慢），供前端展示与关闭无效源。
 pub(crate) async fn scrape_and_fuse(
     app: &AppHandle,
     code: &str,
     cancel: &CancellationToken,
-) -> Result<Option<SearchResult>, String> {
+) -> Result<ScrapeFusionOutcome, String> {
     // 与交互搜索 rs_search_resource 对齐：无连字符输入补连字符并归一化（ssis666 → SSIS-666）。
     // 队列/下载传入的已是识别后的大写番号，归一化对其为安全 no-op。
     let code = normalize_search_code(code);
     if code.is_empty() {
-        return Ok(None);
+        return Ok(ScrapeFusionOutcome { result: None, diagnostics: Vec::new() });
     }
 
     let settings = settings::get_settings(app.clone()).await.unwrap_or_default();
@@ -522,9 +548,17 @@ pub(crate) async fn scrape_and_fuse(
             .position(|p| p.eq_ignore_ascii_case(name))
             .unwrap_or(usize::MAX)
     };
+    // 默认优先刮削源：设置里指定的「默认刮削网站」（非「自动」时）排最前，
+    // 保证一定进入 top-N 且最先抓取；其后再按评分降序 + 优先级。
+    let default_site = settings.scrape.default_site.clone();
+    let is_default_site = |name: &str| -> bool {
+        default_site != settings::AUTO_HIGHEST_SCORE_SITE
+            && name.eq_ignore_ascii_case(&default_site)
+    };
     scrape_sources.sort_by(|a, b| {
-        score_of(b.name())
-            .cmp(&score_of(a.name()))
+        is_default_site(b.name())
+            .cmp(&is_default_site(a.name())) // 默认源置顶（true 排前）
+            .then_with(|| score_of(b.name()).cmp(&score_of(a.name())))
             .then_with(|| prio_of(a.name()).cmp(&prio_of(b.name())))
     });
     if scrape_sources.len() > FUSED_TOP_N {
@@ -533,25 +567,26 @@ pub(crate) async fn scrape_and_fuse(
 
     // 区分「一个源都没启用」与「有源但没刮到」：无任何可用源时给出可操作的错误，
     // 而非误导用户去检查番号。MetaTube 就绪时即便没启用自研源也可单独刮削。
-    if scrape_sources.is_empty() {
-        let metatube_ready = app
-            .try_state::<crate::metatube::MetaTubeManager>()
-            .and_then(|m| m.client())
-            .is_some();
-        if !metatube_ready {
-            return Err("未启用任何刮削网站，请先在设置中开启至少一个网站".to_string());
-        }
+    let metatube_ready = app
+        .try_state::<crate::metatube::MetaTubeManager>()
+        .and_then(|m| m.client())
+        .is_some();
+    if scrape_sources.is_empty() && !metatube_ready {
+        return Err("未启用任何刮削网站，请先在设置中开启至少一个网站".to_string());
     }
 
     let max_concurrent = (settings.scrape.concurrent.max(1) as usize).max(1);
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
 
     // 每个源/ MetaTube 完成即把结果送入 channel；收集端按「首个结果 + 收集窗口 / 绝对超时」提前返回。
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SearchResult>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SourceMessage>();
 
     // 子令牌：提前返回后 cancel 它即可让未收完的慢源**立即关 WebView 窗口、释放槽位**
     //（fetcher 见取消即关窗），避免批量场景下后台慢源窗口堆积；外部取消父令牌也会传递到这里。
     let child = cancel.child_token();
+
+    // 各源诊断：先按参与源预置为 timeout（未回传即视为太慢/被取消），任务回传后再更新为真实状态。
+    let mut diagnostics: Vec<SourceDiagnostic> = Vec::new();
 
     for source in scrape_sources {
         let app = app.clone();
@@ -572,6 +607,14 @@ pub(crate) async fn scrape_and_fuse(
                 avg_score: None,
                 scrape_count: None,
             });
+        diagnostics.push(SourceDiagnostic {
+            source: site.id.clone(),
+            site_name: if site.name.is_empty() { site.id.clone() } else { site.name.clone() },
+            url: site.url.clone(),
+            status: "timeout".to_string(),
+            error: None,
+            elapsed_ms: 0,
+        });
         tokio::spawn(async move {
             let _permit = match semaphore.acquire().await {
                 Ok(p) => p,
@@ -580,7 +623,8 @@ pub(crate) async fn scrape_and_fuse(
             if cancel.is_cancelled() {
                 return;
             }
-            if let Some(r) = fetch_and_parse_source(
+            let started = std::time::Instant::now();
+            let outcome = fetch_and_parse_source(
                 &app,
                 source.as_ref(),
                 &site,
@@ -589,15 +633,25 @@ pub(crate) async fn scrape_and_fuse(
                 &cover,
                 &cancel,
             )
-            .await
-            {
-                let _ = tx.send(r);
-            }
+            .await;
+            let _ = tx.send(SourceMessage {
+                source_id: site.id.clone(),
+                outcome,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            });
         });
     }
 
-    // MetaTube 最优与自研源**并发**（不再串行等在最后），就绪才有结果
-    {
+    // MetaTube 最优与自研源**并发**（不再串行等在最后），就绪才参与
+    if metatube_ready {
+        diagnostics.push(SourceDiagnostic {
+            source: crate::metatube::SOURCE_ID.to_string(),
+            site_name: "MetaTube 聚合源".to_string(),
+            url: String::new(),
+            status: "timeout".to_string(),
+            error: None,
+            elapsed_ms: 0,
+        });
         let app = app.clone();
         let code = code.clone();
         let cover = preferred_cover_type.clone();
@@ -607,9 +661,16 @@ pub(crate) async fn scrape_and_fuse(
             if cancel.is_cancelled() {
                 return;
             }
-            if let Some(r) = metatube_top_result(&app, &code, &cover).await {
-                let _ = tx.send(r);
-            }
+            let started = std::time::Instant::now();
+            let outcome = match metatube_top_result(&app, &code, &cover).await {
+                Some(r) => SourceFetchOutcome::Success(r),
+                None => SourceFetchOutcome::Empty,
+            };
+            let _ = tx.send(SourceMessage {
+                source_id: crate::metatube::SOURCE_ID.to_string(),
+                outcome,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            });
         });
     }
     drop(tx); // 关闭原始发送端：所有任务结束后 rx.recv() 返回 None
@@ -622,10 +683,30 @@ pub(crate) async fn scrape_and_fuse(
         let deadline = soft.map(|s| s.min(hard)).unwrap_or(hard);
         tokio::select! {
             msg = rx.recv() => match msg {
-                Some(r) => {
-                    results.push(r);
-                    if soft.is_none() {
-                        soft = Some(tokio::time::Instant::now() + FUSED_FIRST_GRACE);
+                Some(msg) => {
+                    // 更新该源诊断（成功记命中详情页 URL；失败记原因；耗时按实测）
+                    if let Some(d) = diagnostics.iter_mut().find(|d| d.source == msg.source_id) {
+                        d.elapsed_ms = msg.elapsed_ms;
+                        match &msg.outcome {
+                            SourceFetchOutcome::Success(r) => {
+                                d.status = "success".to_string();
+                                if !r.page_url.is_empty() {
+                                    d.url = r.page_url.clone();
+                                }
+                            }
+                            SourceFetchOutcome::Empty => d.status = "empty".to_string(),
+                            SourceFetchOutcome::Failed(e) => {
+                                d.status = "failed".to_string();
+                                d.error = Some(e.clone());
+                            }
+                        }
+                    }
+                    // 只有真实结果参与融合，并据此启动收集窗口（与旧逻辑一致）
+                    if let SourceFetchOutcome::Success(r) = msg.outcome {
+                        results.push(r);
+                        if soft.is_none() {
+                            soft = Some(tokio::time::Instant::now() + FUSED_FIRST_GRACE);
+                        }
                     }
                 }
                 None => break,
@@ -637,16 +718,68 @@ pub(crate) async fn scrape_and_fuse(
     // 通知未收完的慢源立即停止并关窗（提前返回时丢弃其迟到结果），避免后台窗口堆积
     child.cancel();
 
-    log::info!("[scrape_fuse] event=fused code={} sources={}", code, results.len());
-    Ok(super::fusion::merge_sources(results))
+    // 诊断展示排序：无效/慢源在前（便于识别关闭），成功源在后；同状态按耗时降序
+    fn status_rank(status: &str) -> u8 {
+        match status {
+            "failed" => 0,
+            "timeout" => 1,
+            "empty" => 2,
+            _ => 3, // success
+        }
+    }
+    diagnostics.sort_by(|a, b| {
+        status_rank(&a.status)
+            .cmp(&status_rank(&b.status))
+            .then_with(|| b.elapsed_ms.cmp(&a.elapsed_ms))
+    });
+
+    let diag_summary = diagnostics
+        .iter()
+        .map(|d| format!("{}={}({}ms)", d.source, d.status, d.elapsed_ms))
+        .collect::<Vec<_>>()
+        .join(",");
+    log::info!(
+        "[scrape_fuse] event=fused code={} sources={} diag=[{}]",
+        code,
+        results.len(),
+        diag_summary
+    );
+
+    // 默认优先源命中时抬升其详细度评分，使其成为融合主源（重叠字段/封面优先用它）；
+    // 缺失字段仍由其它源并集补全。「自动（最高分）」时不干预，沿用评分最高者为主源。
+    if default_site != settings::AUTO_HIGHEST_SCORE_SITE {
+        if let Some(max_score) = results.iter().map(|r| r.detail_score).max() {
+            for r in results.iter_mut() {
+                if r.source.eq_ignore_ascii_case(&default_site) {
+                    r.detail_score = max_score.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    Ok(ScrapeFusionOutcome {
+        result: super::fusion::merge_sources(results),
+        diagnostics,
+    })
+}
+
+/// 融合刮削响应：最佳结果 + 各源诊断（供前端展示信息来源、识别并关闭无效源）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FusedScrapeResponse {
+    pub result: Option<SearchResult>,
+    pub diagnostics: Vec<SourceDiagnostic>,
 }
 
 /// 详情刮削命令：多源融合产出最佳结果（不入库，供前端填表单/预览）。封面/缩略图代理本地缓存以便展示。
+/// 同时返回各源诊断（成功/无数据/失败/太慢 + 命中网址），供前端展示与关闭无效源。
 #[tauri::command]
-pub async fn rs_scrape_fused(app: AppHandle, code: String) -> Result<Option<SearchResult>, String> {
+pub async fn rs_scrape_fused(app: AppHandle, code: String) -> Result<FusedScrapeResponse, String> {
     let cancel = CancellationToken::new();
-    let Some(mut result) = scrape_and_fuse(&app, &code, &cancel).await? else {
-        return Ok(None);
+    let outcome = scrape_and_fuse(&app, &code, &cancel).await?;
+    let diagnostics = outcome.diagnostics;
+    let Some(mut result) = outcome.result else {
+        return Ok(FusedScrapeResponse { result: None, diagnostics });
     };
     // 翻译融合结果，让对话框预览即看到译文（与旧详情刮削一致；保存时再翻译为幂等）。
     // 是否翻译由设置开关控制，关则原样返回。
@@ -700,7 +833,7 @@ pub async fn rs_scrape_fused(app: AppHandle, code: String) -> Result<Option<Sear
             result.remote_cover_url = None;
         }
     }
-    Ok(Some(result))
+    Ok(FusedScrapeResponse { result: Some(result), diagnostics })
 }
 
 /// 归一化搜索输入番号：补连字符（`ssis666` → `SSIS-666`），让无连字符输入与标准写法
@@ -1389,7 +1522,7 @@ async fn proxy_image_to_file(
 
 // ==================== 刮削保存 ====================
 
-use super::types::SearchResult;
+use super::types::{SearchResult, SourceDiagnostic};
 use crate::db::Database;
 use crate::resource_scrape::types::ScrapeMetadata;
 use serde::{Deserialize, Serialize};
@@ -1778,12 +1911,16 @@ use uuid::Uuid;
 /// 任务队列全局状态管理（resource_scrape 版本）
 pub struct RsTaskQueueState {
     pub manager: Arc<Mutex<Option<TaskQueueManager>>>,
+    /// 各任务最近一次融合刮削的各源诊断（task_id → 诊断列表），内存态，供批量页展开查看。
+    /// 任务 id 为 UUID 不复用，重启后清空即可，故不入库、不做过期清理。
+    pub diagnostics: Arc<Mutex<std::collections::HashMap<String, Vec<SourceDiagnostic>>>>,
 }
 
 impl RsTaskQueueState {
     pub fn new() -> Self {
         Self {
             manager: Arc::new(Mutex::new(None)),
+            diagnostics: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 }
@@ -1793,6 +1930,16 @@ impl RsTaskQueueState {
 pub async fn rs_get_scrape_tasks(app: AppHandle) -> Result<Vec<crate::db::ScrapeTask>, String> {
     let db = Database::new(&app).map_err(|e| e.to_string())?;
     db.get_all_scrape_tasks().await.map_err(|e| e.to_string())
+}
+
+/// 获取指定任务最近一次刮削的各源诊断（供批量页展开查看信息来源/识别无效源）
+#[tauri::command]
+pub async fn rs_get_task_diagnostics(
+    queue_state: State<'_, RsTaskQueueState>,
+    task_id: String,
+) -> Result<Vec<SourceDiagnostic>, String> {
+    let map = queue_state.diagnostics.lock().await;
+    Ok(map.get(&task_id).cloned().unwrap_or_default())
 }
 
 /// 创建过滤后的刮削任务

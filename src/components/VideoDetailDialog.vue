@@ -47,7 +47,8 @@ import {
     Captions
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
-import type { Video } from '@/types'
+import type { Video, SourceDiagnostic } from '@/types'
+import { diagStatusText, diagBadgeClass } from '@/utils/scrapeDiagnostic'
 import { openInExplorer, openWithPlayer, updateVideo, openVideoPlayerWindow, openVideoPlaylistWindow } from '@/lib/tauri'
 import { useVideoStore } from '@/stores'
 import { useResourceScrapeStore } from '@/stores/resourceScrape'
@@ -91,6 +92,8 @@ const formData = ref<Partial<Video>>({})
 const isDirty = ref(false)
 const isSaving = ref(false)
 const isScraping = ref(false)
+// 各源刮削诊断：一键刮削后展示每个源的结果（来自哪个网址/是否有效），便于识别并关闭无效源
+const scrapeDiagnostics = ref<SourceDiagnostic[]>([])
 const hasScrapedData = ref(false) // 标记是否刮削了新数据
 const aiRecognizing = ref(false) // AI识别番号状态
 const probingDuration = ref(false) // 探测时长状态
@@ -137,6 +140,7 @@ function resetScrapePendingState(options: { previews?: boolean } = {}) {
     if (previews) {
         resetPendingPreviewState()
     }
+    scrapeDiagnostics.value = []
 }
 
 const isOpen = computed({
@@ -531,10 +535,13 @@ const handleScrape = async () => {
     }
 
     isScraping.value = true
+    scrapeDiagnostics.value = []
 
     try {
         // 详情刮削没有选择列表：并发查询所有已启用数据源并按字段融合出最佳结果
-        const best = await scrapeStore.scrapeFused(localId)
+        const { result: best, diagnostics } = await scrapeStore.scrapeFused(localId)
+        // 各源诊断（成功并附网址/失败/超时/无数据）供展示，便于关闭无效源；无结果时同样展示以说明原因
+        scrapeDiagnostics.value = diagnostics
 
         if (!best) {
             toast.warning('未找到该番号的信息，请检查番号是否正确')
@@ -1403,6 +1410,26 @@ const downloadLongScreenshot = async () => {
                             <ShieldAlert class="mt-0.5 size-4 shrink-0" />
                             <div>
                                 当前正在等待 Cloudflare 验证，请在弹出的 WebView 中完成操作，验证通过后会自动继续刮削。
+                            </div>
+                        </div>
+
+                        <!-- 各源刮削诊断：展示每个源来自哪个网址、是否有效，便于到设置中关闭无效源以提速 -->
+                        <div v-if="scrapeDiagnostics.length > 0"
+                            class="rounded-md border bg-muted/30 px-3 py-2 text-xs">
+                            <div class="mb-1.5 font-medium text-muted-foreground">
+                                刮削来源（{{ scrapeDiagnostics.length }} 个源，无效/慢源在前，可到设置中关闭）
+                            </div>
+                            <div class="max-h-40 space-y-1 overflow-y-auto">
+                                <div v-for="d in scrapeDiagnostics" :key="d.source" class="flex items-center gap-2">
+                                    <span class="inline-flex min-w-[3rem] shrink-0 justify-center rounded px-1.5 py-0.5 text-[10px] font-medium"
+                                        :class="diagBadgeClass(d.status)">
+                                        {{ diagStatusText(d.status) }}
+                                    </span>
+                                    <span class="shrink-0 font-medium">{{ d.siteName }}</span>
+                                    <span v-if="d.url" class="truncate font-mono text-muted-foreground" :title="d.error || d.url">{{ d.url }}</span>
+                                    <span v-else-if="d.error" class="truncate text-muted-foreground" :title="d.error">{{ d.error }}</span>
+                                    <span class="ml-auto shrink-0 tabular-nums text-muted-foreground">{{ d.elapsedMs }}ms</span>
+                                </div>
                             </div>
                         </div>
 

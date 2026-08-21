@@ -439,6 +439,7 @@ onActivated(() => {
           <!-- 表头 -->
           <div class="border-b bg-background sticky top-0 z-10">
             <div class="flex items-center h-12">
+              <div class="w-7 shrink-0"></div>
               <div class="flex-1 min-w-0 px-4 font-medium text-sm text-muted-foreground">路径</div>
               <div class="w-40 shrink-0 px-4 font-medium text-sm text-muted-foreground">进度</div>
               <div class="w-24 shrink-0 px-4 font-medium text-sm text-muted-foreground">状态</div>

@@ -5,7 +5,7 @@ import { ref, computed } from 'vue'
 import { toast } from 'vue-sonner'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import type { ScrapeTask, ScrapeLogEntry, ResourceItem } from '@/types'
+import type { ScrapeTask, ScrapeLogEntry, ResourceItem, SourceDiagnostic, FusedScrapeResult } from '@/types'
 import { ScrapeStatus } from '@/types'
 import { useSettingsStore } from '@/stores/settings'
 
@@ -274,6 +274,8 @@ export const useResourceScrapeStore = defineStore('resourceScrape', () => {
     // ============ 刮削任务状态 ============
     const tasks = ref<ScrapeTask[]>([])
     const logs = ref<ScrapeLogEntry[]>([])
+    // 批量任务的各源诊断缓存（task_id → 诊断列表），批量页展开行时按需拉取
+    const taskDiagnostics = ref<Record<string, SourceDiagnostic[]>>({})
     const loading = ref(false)
     const error = ref<string | null>(null)
     // ============ 任务队列控制 ============
@@ -453,13 +455,24 @@ export const useResourceScrapeStore = defineStore('resourceScrape', () => {
     }
 
     /** 多源字段级融合刮削：无选择列表的场景（视频详情/批量/下载后自动刮削），
-     *  并发查询所有已启用数据源 + MetaTube，按字段融合出一个最完整的最佳结果 */
-    async function scrapeFused(code: string): Promise<ResourceItem | null> {
-        const raw = await invoke<BackendSearchResult | null>('rs_scrape_fused', { code })
-        return raw ? toResourceItem(raw) : null
+     *  并发查询所有已启用数据源 + MetaTube，按字段融合出一个最完整的最佳结果，
+     *  并返回各源诊断（成功/无数据/失败/太慢 + 命中网址），供前端展示与关闭无效源 */
+    async function scrapeFused(code: string): Promise<FusedScrapeResult> {
+        const raw = await invoke<{ result: BackendSearchResult | null; diagnostics: SourceDiagnostic[] }>('rs_scrape_fused', { code })
+        return {
+            result: raw.result ? toResourceItem(raw.result) : null,
+            diagnostics: raw.diagnostics ?? [],
+        }
     }
 
     // ============ 刮削任务操作 ============
+
+    /** 拉取指定批量任务的各源诊断（供批量页展开行显示），结果缓存到 taskDiagnostics */
+    async function fetchTaskDiagnostics(taskId: string): Promise<SourceDiagnostic[]> {
+        const diags = await invoke<SourceDiagnostic[]>('rs_get_task_diagnostics', { taskId })
+        taskDiagnostics.value = { ...taskDiagnostics.value, [taskId]: diags }
+        return diags
+    }
 
     async function fetchTasks() {
         console.log('[ResourceScrapeStore] fetchTasks() called')
@@ -842,6 +855,7 @@ export const useResourceScrapeStore = defineStore('resourceScrape', () => {
         // 刮削任务状态
         tasks,
         logs,
+        taskDiagnostics,
         loading,
         error,
         isProcessingQueue,
@@ -859,6 +873,7 @@ export const useResourceScrapeStore = defineStore('resourceScrape', () => {
         scrapeFused,
         // 任务操作
         fetchTasks,
+        fetchTaskDiagnostics,
         createTask,
         startTask,
         stopTask,

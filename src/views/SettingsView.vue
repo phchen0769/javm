@@ -527,7 +527,7 @@ const toggleAllScrapeSites = (enabled: boolean) => {
   if (!enabled && sites.length > 0) {
     // 全部关闭时保留第一个，确保至少有一个启用
     sites.forEach((site, i) => { site.enabled = i === 0 })
-    const displayName = isDeveloperMode ? sites[0].name : '数据源 1'
+    const displayName = sites[0].name || sites[0].id
     toast.warning(`已保留 ${displayName} 为唯一启用网站`)
   } else {
     sites.forEach(site => { site.enabled = enabled })
@@ -1030,7 +1030,7 @@ watch(() => settingsStore.settings, async (newSettings) => {
                 <div class="flex items-center justify-between">
                   <div>
                     <p class="font-medium">默认刮削网站</p>
-                    <p class="text-sm text-muted-foreground">详情刮削、自动刮削和任务队列优先使用此网站；选「自动（最高分）」则用累计得分最高的数据源</p>
+                    <p class="text-sm text-muted-foreground">详情刮削、自动刮削和任务队列会最先抓取此网站、并优先采用其数据作为融合主源；选「自动（最高分）」则用累计得分最高的数据源</p>
                   </div>
                   <Select :model-value="localSettings.scrape.defaultSite"
                     @update:model-value="(v) => { localSettings.scrape.defaultSite = String(v); saveScrapeSettings() }">
@@ -1344,7 +1344,7 @@ watch(() => settingsStore.settings, async (newSettings) => {
                         class="flex items-center justify-between gap-4 rounded-md border border-border/60 px-3 py-3">
                         <div class="min-w-0">
                           <div class="flex items-center gap-2">
-                            <p class="font-medium">{{ isDeveloperMode ? (site.name || site.id) : `数据源 ${localSettings.scrape.sites.indexOf(site) + 1}` }}</p>
+                            <p class="font-medium">{{ site.name || site.id }}</p>
                             <Badge v-if="isDeveloperMode" variant="outline">{{ site.id }}</Badge>
                             <Badge v-if="site.scrapeCount" variant="secondary" class="text-xs tabular-nums">
                               {{ site.avgScore ?? 0 }}分

@@ -12,8 +12,6 @@ import {
 } from '@/components/ui/table'
 import ResourceDetailDialog from '@/components/ResourceDetailDialog.vue'
 
-const isDev = import.meta.env.DEV
-
 // 组件属性
 defineProps<{
   results: ResourceItem[]  // 搜索结果列表
@@ -80,7 +78,7 @@ function handleRowClick(item: ResourceItem) {
           <TableCell class="w-32 min-w-32 whitespace-nowrap">{{ displayValue(item.code) }}</TableCell>
           <TableCell class="max-w-0">
             <div class="truncate">{{ displayValue(item.title) }}</div>
-            <div v-if="isDev" class="mt-1 space-y-1 text-[11px] text-muted-foreground">
+            <div class="mt-1 space-y-1 text-[11px] text-muted-foreground">
               <div class="truncate">来源: {{ displayValue(item.source || '') }}</div>
               <div class="truncate font-mono">链接: {{ displayValue(item.pageUrl || '') }}</div>
             </div>

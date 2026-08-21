@@ -129,6 +129,26 @@ pub struct SearchResult {
     pub cover_candidates: Vec<String>,
 }
 
+/// 单个刮削源的执行诊断：一次融合刮削里每个源的结果，用于前端展示「信息来自哪个网址、
+/// 哪些源无效」，便于用户手动关闭无效源以提速。
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceDiagnostic {
+    /// 源 id（与设置里的 site.id 一致，便于对应开关）
+    pub source: String,
+    /// 真实站点名（展示用，如 "JavBus"）
+    pub site_name: String,
+    /// 命中详情页地址（成功时）或站点主页（其余状态）
+    pub url: String,
+    /// 状态："success" 成功 / "empty" 无有效数据 / "failed" 抓取失败 / "timeout" 太慢未完成
+    pub status: String,
+    /// 失败原因（status = failed 时有值）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// 耗时（毫秒）
+    pub elapsed_ms: u64,
+}
+
 // ============================================================
 // 从 scraper::types 迁移的类型
 // ============================================================

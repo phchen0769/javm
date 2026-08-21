@@ -400,6 +400,12 @@ impl ScannerService {
             None
         };
 
+        // 同级已具备 NFO + 任一封面(poster/thumb/fanart)即视为已刮削。
+        // 竖版海报裁切失败或外部库仅提供横版图时 poster 可能缺失，故与 has_cover_image 一致认任一封面，
+        // 不再仅认 poster（旧规则会把「NFO + 仅 fanart/thumb」误判为未刮削）。
+        let sibling_scraped =
+            nfo_mtime.is_some() && (poster.is_some() || thumb.is_some() || fanart.is_some());
+
         if let Some(existing_info) = existing.as_ref() {
             let unchanged = existing_info.file_size == file_size
                 && existing_info.file_mtime == file_mtime
@@ -410,6 +416,12 @@ impl ScannerService {
 
             if unchanged {
                 existing_paths.remove(&path_str);
+                // 自愈历史误判：旧规则仅认 poster，「NFO + 仅横版封面」被标为未刮削(1)。
+                // 内容未变时若同级已具备 NFO+任一封面，将 1 升级为已完成(2)，只升不降、不动失败态(3/4)。
+                if existing_info.scan_status == 1 && sibling_scraped {
+                    Database::update_video_scan_status(tx, &existing_info.id, 2)
+                        .map_err(|e| format!("更新扫描状态失败 '{}': {}", path_str, e))?;
+                }
                 // 文件没变且确实无任何封面（含库内独立目录记录）才派发截帧
                 if !has_any_cover {
                     if let Some(sender) = cover_tx {
@@ -501,14 +513,10 @@ impl ScannerService {
             || existing.as_ref().map(|e| e.original_title.clone()),
         ).unwrap_or_else(|| filename.clone());
 
-        // 判断扫描状态：同时存在 .nfo 文件和 poster 即为已刮削（状态2）。
+        // 判断扫描状态：同级同时存在 .nfo 与任一封面即为已刮削（状态2，见上方 sibling_scraped）。
         // 独立目录模式下 NFO/封面不在视频同级、扫描看不到，故已刮削项保持状态不回退。
         let already_scraped = existing.as_ref().map(|e| e.scan_status == 2).unwrap_or(false);
-        let scan_status = if (nfo_mtime.is_some() && poster.is_some()) || already_scraped {
-            2
-        } else {
-            1
-        };
+        let scan_status = if sibling_scraped || already_scraped { 2 } else { 1 };
 
         let local_id = resolve_nfo_field(
             nfo_mtime, nfo_changed,
