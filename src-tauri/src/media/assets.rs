@@ -27,6 +27,15 @@ pub struct RelocatedVideoAssets {
     pub poster: Option<String>,
     pub thumb: Option<String>,
     pub fanart: Option<String>,
+    /// 分段影片归入组目录时随之搬入的同组其它段，供调用方同步写库；非分段影片为空
+    pub moved_siblings: Vec<MovedStackSibling>,
+}
+
+/// 随分段影片一起搬进组目录的同组其它段（原路径 → 新路径）
+#[derive(Debug, Clone)]
+pub struct MovedStackSibling {
+    pub original_video_path: String,
+    pub video_path: String,
 }
 
 // ============================================================
@@ -89,8 +98,71 @@ pub fn has_same_named_parent_dir(video_path: &Path) -> bool {
     parent_name.eq_ignore_ascii_case(file_stem)
 }
 
+/// 分段影片（`SIVR-015-2.mp4`）所在目录是否已属于该分段组：目录名就是组基名（`SIVR-015`）
+/// 或组内某一段（`SIVR-015-1`）。此时不再按段名另建子目录，否则同组各段会被拆到不同目录
+/// （`SIVR-015-1/SIVR-015-1.mp4` + `SIVR-015-1/SIVR-015-2/SIVR-015-2.mp4`）。
+fn is_stack_part_in_grouped_dir(video_path: &Path) -> bool {
+    use crate::utils::designation_recognizer::{dir_belongs_to_stack, parse_stack_part};
+
+    let Some(stem) = video_path.file_stem().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some((base, _)) = parse_stack_part(stem) else {
+        return false;
+    };
+    video_path
+        .parent()
+        .and_then(|dir| dir.file_name())
+        .and_then(|name| name.to_str())
+        .is_some_and(|parent_name| dir_belongs_to_stack(parent_name, &base))
+}
+
 fn is_subtitle_suffix_separator(ch: char) -> bool {
     matches!(ch, '.' | '_' | '-' | ' ' | '[' | '(')
+}
+
+/// 候选文件名 stem（已小写）是否与视频 stem（已小写）匹配：相等，或以「stem+分隔符」为前缀
+/// （`ABC-123.zh.srt`、`ABC-123-eng.ass`、`ABC-123 [chs].vtt`）。
+fn subtitle_stem_matches(video_stem_lower: &str, candidate_stem_lower: &str) -> bool {
+    candidate_stem_lower == video_stem_lower
+        || candidate_stem_lower
+            .strip_prefix(video_stem_lower)
+            .is_some_and(|suffix| suffix.chars().next().is_some_and(is_subtitle_suffix_separator))
+}
+
+/// 从目录项列表中收集字幕文件的 stem（小写），供同目录多个视频复用一次 read_dir 的结果。
+pub fn collect_subtitle_stems(entries: &[std::fs::DirEntry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let extension = path.extension().and_then(|ext| ext.to_str())?;
+            if !SUBTITLE_EXTENSIONS.iter().any(|item| item.eq_ignore_ascii_case(extension)) {
+                return None;
+            }
+            path.file_stem().and_then(|name| name.to_str()).map(|s| s.to_ascii_lowercase())
+        })
+        .collect()
+}
+
+/// 给定目录内字幕 stem 列表（见 [`collect_subtitle_stems`]），判断视频 stem 是否有匹配字幕。
+pub fn stem_has_matching_subtitle(subtitle_stems_lower: &[String], video_stem: &str) -> bool {
+    let video_stem_lower = video_stem.to_ascii_lowercase();
+    subtitle_stems_lower
+        .iter()
+        .any(|candidate| subtitle_stem_matches(&video_stem_lower, candidate))
+}
+
+/// 目录内是否存在与给定 stem 匹配的字幕文件（任意语言/扩展名）。
+///
+/// stem 由 `resolve_existing_asset_dir` 给出（跟随视频=视频文件名，独立目录=番号）。
+/// 会做一次 read_dir，只应在扫描入库、字幕回填等低频路径调用，不要在列表加载时逐视频调用。
+pub fn dir_has_matching_subtitle(dir: &Path, stem: &str) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    let entries: Vec<std::fs::DirEntry> = entries.flatten().collect();
+    stem_has_matching_subtitle(&collect_subtitle_stems(&entries), stem)
 }
 
 fn is_matching_subtitle_file(video_path: &Path, candidate: &Path) -> bool {
@@ -469,6 +541,15 @@ pub fn rename_video_assets_with_title(
         .file_stem()
         .and_then(|name| name.to_str())
         .ok_or("无效的视频文件名")?;
+    // 分段影片不按标题改名：只改当前段会与同组其它段的基名脱节，合集随即拆散
+    if crate::utils::designation_recognizer::parse_stack_part(old_stem).is_some() {
+        log::info!(
+            "[media_assets] event=rename_skipped_stack_part video_path={} new_title={}",
+            video_path,
+            new_title
+        );
+        return Ok(None);
+    }
     let new_stem = sanitize_title_for_path(new_title)?;
     let current_parent_name = old_dir.file_name().and_then(|name| name.to_str());
     let already_in_target_parent = current_parent_name
@@ -610,9 +691,107 @@ pub fn rename_video_assets_with_title(
             .or(fanart_source)
             .map(|path| path.to_string_lossy().to_string())
             .or_else(|| fanart.map(|p| p.to_string())),
+        moved_siblings: Vec::new(),
     }))
 }
 
+/// 分段影片的组目录名：去分段后缀的基名，保留文件名原大小写
+/// （[`parse_stack_part`] 产出的是大写归一基名，不宜直接拿来建目录）。非分段影片返回 `None`。
+fn stack_group_dir_name(file_stem: &str) -> Option<String> {
+    let (base, _) = crate::utils::designation_recognizer::parse_stack_part(file_stem)?;
+    Some(
+        file_stem
+            .get(..base.len())
+            .filter(|head| head.eq_ignore_ascii_case(&base))
+            .map(str::to_string)
+            .unwrap_or(base),
+    )
+}
+
+/// 把同目录里属于同一分段组的其它段（连同各自的 NFO / 图集 / 字幕）搬进组目录，
+/// 返回搬动的段（原路径 → 新路径）。单个段搬不动只记日志跳过，不中断主流程。
+fn move_stack_siblings(
+    parent_dir: &Path,
+    target_dir: &Path,
+    stack_base: &str,
+    current_video: &Path,
+) -> Vec<MovedStackSibling> {
+    use crate::scanner::file_scanner::is_video_file;
+    use crate::utils::designation_recognizer::parse_stack_part;
+
+    let Ok(entries) = fs::read_dir(parent_dir) else {
+        return Vec::new();
+    };
+    let mut moved = Vec::new();
+    for entry in entries.flatten() {
+        let candidate = entry.path();
+        if candidate == current_video || !candidate.is_file() || !is_video_file(&candidate) {
+            continue;
+        }
+        let same_group = candidate
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(parse_stack_part)
+            .is_some_and(|(base, _)| base.eq_ignore_ascii_case(stack_base));
+        if !same_group {
+            continue;
+        }
+        let Some(file_name) = candidate.file_name() else {
+            continue;
+        };
+        let target = target_dir.join(file_name);
+        if target.exists() {
+            log::warn!(
+                "[media_assets] event=move_stack_sibling_skipped_target_exists source={} target={}",
+                candidate.display(),
+                target.display()
+            );
+            continue;
+        }
+        if let Err(error) = move_file(&candidate, &target) {
+            log::error!(
+                "[media_assets] event=move_stack_sibling_failed source={} target={} error={}",
+                candidate.display(),
+                target.display(),
+                error
+            );
+            continue;
+        }
+
+        let nfo = candidate.with_extension("nfo");
+        if nfo.exists() {
+            let new_nfo = target.with_extension("nfo");
+            if let Err(error) = move_file(&nfo, &new_nfo) {
+                log::error!(
+                    "[media_assets] event=move_nfo_failed source={} target={} error={}",
+                    nfo.display(),
+                    new_nfo.display(),
+                    error
+                );
+            }
+        }
+        for suffix in ["poster", "thumb", "fanart"] {
+            move_optional_asset(
+                find_sibling_artwork(&candidate, suffix).map(PathBuf::from),
+                target_dir,
+                suffix,
+            );
+        }
+        move_matching_subtitle_files(&candidate, target_dir);
+
+        moved.push(MovedStackSibling {
+            original_video_path: candidate.to_string_lossy().to_string(),
+            video_path: target.to_string_lossy().to_string(),
+        });
+    }
+    moved
+}
+
+/// 把视频归入同名目录（`ABC-123.mp4` → `ABC-123/ABC-123.mp4`），NFO / 图集 / 字幕随之搬入。
+///
+/// 分段影片（`FC2-780185-1.mp4`）改归入以组基名命名的目录（`FC2-780185/`），并把同目录里的
+/// 同组其它段一并搬入（见 [`move_stack_siblings`]）：只搬当前段会把合集拆散——
+/// `FC2-780185-1/` 里只有第 1 段，第 2、3 段留在原地。
 pub fn ensure_video_in_named_parent_dir(
     video_path: &str,
     poster: Option<&str>,
@@ -620,7 +799,8 @@ pub fn ensure_video_in_named_parent_dir(
     fanart: Option<&str>,
 ) -> Result<Option<RelocatedVideoAssets>, String> {
     let video_path_obj = Path::new(video_path);
-    if has_same_named_parent_dir(video_path_obj) {
+    // 已在同名目录，或分段影片已与同组其它段同在一个组目录：不搬动
+    if has_same_named_parent_dir(video_path_obj) || is_stack_part_in_grouped_dir(video_path_obj) {
         return Ok(None);
     }
 
@@ -632,7 +812,8 @@ pub fn ensure_video_in_named_parent_dir(
         .to_string();
     let file_name = video_path_obj.file_name().ok_or("无效的视频文件名")?;
 
-    let target_dir = parent_dir.join(&file_stem);
+    let stack_base = stack_group_dir_name(&file_stem);
+    let target_dir = parent_dir.join(stack_base.as_deref().unwrap_or(&file_stem));
     fs::create_dir_all(&target_dir).map_err(|e| format!("创建同名目录失败: {}", e))?;
 
     let new_video_path = target_dir.join(file_name);
@@ -689,6 +870,11 @@ pub fn ensure_video_in_named_parent_dir(
 
     move_matching_subtitle_files(video_path_obj, &target_dir);
 
+    let moved_siblings = match &stack_base {
+        Some(base) => move_stack_siblings(parent_dir, &target_dir, base, video_path_obj),
+        None => Vec::new(),
+    };
+
     Ok(Some(RelocatedVideoAssets {
         original_video_path: video_path.to_string(),
         video_path: new_video_path.to_string_lossy().to_string(),
@@ -696,6 +882,7 @@ pub fn ensure_video_in_named_parent_dir(
         poster: new_poster,
         thumb: new_thumb,
         fanart: new_fanart,
+        moved_siblings,
     }))
 }
 
@@ -990,6 +1177,97 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::Write;
+
+    #[test]
+    fn stack_part_in_grouped_dir_is_not_relocated() {
+        // 第 2 段已与第 1 段同在以段名 / 基名命名的组目录：视为已归位
+        assert!(is_stack_part_in_grouped_dir(Path::new("/lib/05/SIVR-015-1/SIVR-015-2.mp4")));
+        assert!(is_stack_part_in_grouped_dir(Path::new("/lib/05/SIVR-015/SIVR-015-2.mp4")));
+        assert!(is_stack_part_in_grouped_dir(Path::new("/lib/03/STARS-818-01/STARS-818-02.mp4")));
+        // 平铺在普通目录 / 别的番号目录：仍按原逻辑归入同名目录
+        assert!(!is_stack_part_in_grouped_dir(Path::new("/lib/05/SIVR-015-2.mp4")));
+        assert!(!is_stack_part_in_grouped_dir(Path::new("/lib/05/SIVR-016-1/SIVR-015-2.mp4")));
+        // 非分段影片不受影响
+        assert!(!is_stack_part_in_grouped_dir(Path::new("/lib/05/SSIS-001/SSIS-002.mp4")));
+    }
+
+    #[test]
+    fn stack_parts_relocate_together_into_group_dir() {
+        // 用户实际场景：三段平铺在普通目录，刮削保存第 1 段时三段应一起归入组目录，不能只搬第 1 段
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let root = dir.path();
+        for name in [
+            "FC2-780185-1.mp4",
+            "FC2-780185-2.mp4",
+            "FC2-780185-3.mp4",
+            "FC2-780185-2.zh.srt",
+            "FC2-780185-3-poster.jpg",
+            "OTHER-001.mp4",
+        ] {
+            fs::write(root.join(name), b"x").expect("写入测试文件失败");
+        }
+
+        let first = root.join("FC2-780185-1.mp4");
+        let relocated = ensure_video_in_named_parent_dir(first.to_str().unwrap(), None, None, None)
+            .expect("归入组目录失败")
+            .expect("应当发生搬动");
+
+        // 组目录以基名命名（保留原大小写），当前段搬入
+        let group = root.join("FC2-780185");
+        assert_eq!(Path::new(&relocated.dir_path), group);
+        assert_eq!(Path::new(&relocated.video_path), group.join("FC2-780185-1.mp4"));
+        // 同组其它段及其字幕 / 图集随之搬入，原位置不再有
+        assert!(group.join("FC2-780185-2.mp4").exists());
+        assert!(group.join("FC2-780185-3.mp4").exists());
+        assert!(group.join("FC2-780185-2.zh.srt").exists());
+        assert!(group.join("FC2-780185-3-poster.jpg").exists());
+        assert!(!root.join("FC2-780185-2.mp4").exists());
+        assert!(!root.join("FC2-780185-3-poster.jpg").exists());
+        // 无关文件不动
+        assert!(root.join("OTHER-001.mp4").exists());
+        // 回报搬动的段，供调用方同步写库
+        let mut moved: Vec<String> = relocated
+            .moved_siblings
+            .iter()
+            .map(|s| Path::new(&s.video_path).file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        moved.sort();
+        assert_eq!(moved, vec!["FC2-780185-2.mp4", "FC2-780185-3.mp4"]);
+        assert!(relocated
+            .moved_siblings
+            .iter()
+            .all(|s| Path::new(&s.original_video_path).parent() == Some(root)));
+
+        // 已在组目录：再次调用不再搬动
+        assert!(ensure_video_in_named_parent_dir(&relocated.video_path, None, None, None)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn single_video_still_relocates_into_named_dir() {
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let root = dir.path();
+        fs::write(root.join("SSIS-001.mp4"), b"x").expect("写入测试文件失败");
+        let relocated =
+            ensure_video_in_named_parent_dir(root.join("SSIS-001.mp4").to_str().unwrap(), None, None, None)
+                .unwrap()
+                .unwrap();
+        assert_eq!(Path::new(&relocated.video_path), root.join("SSIS-001").join("SSIS-001.mp4"));
+        assert!(relocated.moved_siblings.is_empty());
+    }
+
+    #[test]
+    fn rename_with_title_skips_stack_part() {
+        // 分段影片按标题改名会与同组其它段脱节，应跳过并保持原文件不动
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let path = dir.path().join("FC2-780185-1.mp4");
+        fs::write(&path, b"x").expect("写入测试文件失败");
+        let result = rename_video_assets_with_title(path.to_str().unwrap(), "FC2-780185", None, None, None)
+            .expect("不应报错");
+        assert!(result.is_none());
+        assert!(path.exists());
+    }
 
     #[test]
     fn test_rollback_files_deletes_nfo() {

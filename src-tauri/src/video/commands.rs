@@ -1,8 +1,10 @@
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tauri::AppHandle;
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
+use crate::utils::designation_recognizer::stack_scope_dir;
 
 use super::service::{
     clear_video_scrape_data, copy_dir_recursive, delete_video_and_files,
@@ -106,14 +108,16 @@ pub async fn delete_directory(db: State<'_, crate::db::Database>, id: String) ->
 
 /// 将同一影片的分段文件折叠为单张代表卡。
 ///
-/// 按 `(dirPath, stackKey)` 分组，组员 ≥2 时：取段序号（`partIndex`）最小者为代表，
+/// 按 `(分段范围目录, stackKey)` 分组，组员 ≥2 时：取段序号（`partIndex`）最小者为代表，
 /// 为其注入 `parts`（各段 videoPath/partIndex/duration/fileSize/title，按序号排序）、
 /// `partCount`，并把 `duration` 覆盖为各段总时长；其余段从列表移除。
 /// `stackKey` 为空或组员仅 1 的视频原样保留（无 `parts`/`partCount`）。
+///
+/// 范围目录见 [`stack_scope_dir`]：各段可能被「归入同名目录」分别装进以段名命名的子目录
+/// （`SIVR-015-1/SIVR-015-1.mp4` + `SIVR-015-1/SIVR-015-2/SIVR-015-2.mp4`），按直接父目录
+/// 分组会把同一影片拆成两张卡。
 fn fold_video_stacks(videos: &mut Vec<serde_json::Value>) {
-    use std::collections::HashMap;
-
-    // 分组：key = (dirPath, stackKey) → 组员在 videos 中的下标
+    // 分组：key = (分段范围目录, stackKey) → 组员在 videos 中的下标
     let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
     for (idx, v) in videos.iter().enumerate() {
         if let (Some(dir), Some(key)) = (
@@ -121,7 +125,8 @@ fn fold_video_stacks(videos: &mut Vec<serde_json::Value>) {
             v.get("stackKey").and_then(|x| x.as_str()),
         ) {
             if !key.is_empty() {
-                groups.entry((dir.to_string(), key.to_string())).or_default().push(idx);
+                let scope = stack_scope_dir(dir, key);
+                groups.entry((scope, key.to_string())).or_default().push(idx);
             }
         }
     }
@@ -186,7 +191,6 @@ fn fold_video_stacks(videos: &mut Vec<serde_json::Value>) {
 
 #[tauri::command]
 pub async fn get_videos(
-    app: AppHandle,
     db: State<'_, crate::db::Database>,
 ) -> AppResult<Vec<serde_json::Value>> {
     let conn = db.get_connection()?;
@@ -236,7 +240,8 @@ pub async fn get_videos(
                 v.is_uncensored,
                 v.cover_thumb,
                 v.stack_key,
-                v.part_index
+                v.part_index,
+                v.has_subtitle
             FROM videos v
         "#;
         // 注意：不在 SQL 里排序，最终顺序由 enrich_videos_with_file_times 按文件
@@ -284,44 +289,14 @@ pub async fn get_videos(
                     // 分段归并键（去后缀基名）与段序号，仅用于下方 (dirPath, stackKey) 折叠
                     "stackKey": row.get::<_, Option<String>>(25)?,
                     "partIndex": row.get::<_, Option<i64>>(26)?,
+                    // 字幕标记来自库列（扫描/字幕下载时维护），列表不再实时探测文件系统
+                    "hasSubtitle": row.get::<_, Option<i64>>(27)?.unwrap_or(0) != 0,
                 }))
             })?;
 
         let mut videos = Vec::new();
         for video in video_iter {
             videos.push(video?);
-        }
-
-        let stale_paths: Vec<String> = videos
-            .iter()
-            .filter_map(|video| {
-                let path = video.get("videoPath").and_then(|p| p.as_str())?;
-                if std::path::Path::new(path).exists() {
-                    None
-                } else {
-                    Some(path.to_string())
-                }
-            })
-            .collect();
-
-        if !stale_paths.is_empty() {
-            for chunk in stale_paths.chunks(500) {
-                let placeholders = std::iter::repeat_n("?", chunk.len()).collect::<Vec<_>>().join(", ");
-                let sql = format!("DELETE FROM videos WHERE video_path IN ({})", placeholders);
-                let params = chunk
-                    .iter()
-                    .map(|path| path as &dyn rusqlite::types::ToSql)
-                    .collect::<Vec<_>>();
-                conn.execute(&sql, params.as_slice())?;
-            }
-
-            videos.retain(|video| {
-                video
-                    .get("videoPath")
-                    .and_then(|p| p.as_str())
-                    .map(|path| !stale_paths.iter().any(|stale_path| stale_path == path))
-                    .unwrap_or(false)
-            });
         }
 
         // 仅保留位于「目录管理」内的视频，避免下载到库外的文件污染媒体库
@@ -336,21 +311,39 @@ pub async fn get_videos(
                 .unwrap_or(false)
         });
 
-        // 分段折叠：同 (dirPath, stackKey) 且组员 ≥2 的文件合并为一张代表卡，
-        // 代表取段序号最小者，附 parts 列表与 partCount，duration 汇总为总时长；
-        // 其余段从列表移除。单文件或 stackKey 为空者原样保留。
-        fold_video_stacks(&mut videos);
-
         Ok(videos)
     })
     .await
     .map_err(|e| AppError::TaskJoin(e.to_string()))??;
 
-    // 落地配置：字幕探测需据此决定探测目录（独立目录 / 视频同级）
-    let settings = crate::settings::get_settings(app.clone()).await.unwrap_or_default();
-    let cfg = std::sync::Arc::new(crate::media::storage::MetadataStorageConfig::from_settings(&settings));
+    // 并发阶段：文件时间 + 封面存在性；视频文件已不存在的记录一并识别出来
+    //（之前是在 SQL 循环后串行 exists() 一遍，SMB/USB 库上白白多跑一轮文件系统探测）。
+    let (mut videos, stale_paths) = enrich_videos_with_file_times(videos).await;
 
-    Ok(enrich_videos_with_file_times(videos, cfg).await)
+    if !stale_paths.is_empty() {
+        let conn = db.get_connection()?;
+        tokio::task::spawn_blocking(move || -> AppResult<()> {
+            for chunk in stale_paths.chunks(500) {
+                let placeholders = std::iter::repeat_n("?", chunk.len()).collect::<Vec<_>>().join(", ");
+                let sql = format!("DELETE FROM videos WHERE video_path IN ({})", placeholders);
+                let params = chunk
+                    .iter()
+                    .map(|path| path as &dyn rusqlite::types::ToSql)
+                    .collect::<Vec<_>>();
+                conn.execute(&sql, params.as_slice())?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| AppError::TaskJoin(e.to_string()))??;
+    }
+
+    // 分段折叠：同 (dirPath, stackKey) 且组员 ≥2 的文件合并为一张代表卡，
+    // 代表取段序号最小者，附 parts 列表与 partCount，duration 汇总为总时长；
+    // 其余段从列表移除。单文件或 stackKey 为空者原样保留。
+    fold_video_stacks(&mut videos);
+
+    Ok(videos)
 }
 
 /// 获取演员列表（含头像与本地作品数），供「发现」页演员分面显示头像。
@@ -388,6 +381,10 @@ pub async fn get_actors(db: State<'_, crate::db::Database>) -> AppResult<Vec<ser
 /// 回填存量视频的封面尺寸：扫描有 poster 但缺 cover_width/cover_height 的记录，
 /// 仅读图头补算尺寸写回。瀑布流等高画廊布局/虚拟化需要封面比例。
 /// 返回成功补算的数量。
+/// 回填任务的失败重试间隔：失败项 7 天内不再重试，避免每次启动都对同一批无法处理的文件
+/// （AVIF 假 jpg、网络盘写失败）重复跑一遍、拖慢启动。
+const BACKFILL_RETRY_AFTER: &str = "-7 days";
+
 #[tauri::command]
 pub async fn backfill_cover_dimensions(db: State<'_, crate::db::Database>) -> AppResult<u32> {
     let conn = db.get_connection()?;
@@ -397,9 +394,11 @@ pub async fn backfill_cover_dimensions(db: State<'_, crate::db::Database>) -> Ap
             let mut stmt = conn.prepare(
                 "SELECT id, poster FROM videos
                  WHERE poster IS NOT NULL AND poster <> ''
-                   AND (cover_width IS NULL OR cover_height IS NULL)",
+                   AND (cover_width IS NULL OR cover_height IS NULL)
+                   AND (cover_dims_attempted_at IS NULL
+                        OR cover_dims_attempted_at < datetime('now', ?1))",
             )?;
-            let iter = stmt.query_map([], |row| {
+            let iter = stmt.query_map([BACKFILL_RETRY_AFTER], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?;
             let mut list = Vec::new();
@@ -411,13 +410,19 @@ pub async fn backfill_cover_dimensions(db: State<'_, crate::db::Database>) -> Ap
 
         let mut updated = 0u32;
         for (id, poster) in targets {
-            if let Ok((w, h)) = image::image_dimensions(&poster) {
-                if w > 0 && h > 0 {
+            match image::image_dimensions(&poster) {
+                Ok((w, h)) if w > 0 && h > 0 => {
                     conn.execute(
-                        "UPDATE videos SET cover_width = ?, cover_height = ? WHERE id = ?",
+                        "UPDATE videos SET cover_width = ?, cover_height = ?, cover_dims_attempted_at = datetime('now') WHERE id = ?",
                         rusqlite::params![w as i64, h as i64, id],
                     )?;
                     updated += 1;
+                }
+                _ => {
+                    conn.execute(
+                        "UPDATE videos SET cover_dims_attempted_at = datetime('now') WHERE id = ?",
+                        rusqlite::params![id],
+                    )?;
                 }
             }
         }
@@ -431,7 +436,7 @@ pub async fn backfill_cover_dimensions(db: State<'_, crate::db::Database>) -> Ap
 /// （fanart → thumb → poster）生成 `<stem>-thumbsm.jpg` 小图并写回。
 ///
 /// 媒体库网格逐张解码全尺寸大图是列表卡顿的主因，缩略图回填后前端优先用它。
-/// 返回成功生成的数量（跳过源缺失/生成失败的记录，下次运行会再尝试）。
+/// 返回成功生成的数量。生成失败的记录记下尝试时间，[`BACKFILL_RETRY_AFTER`] 内不再重试。
 #[tauri::command]
 pub async fn backfill_cover_thumbnails(db: State<'_, crate::db::Database>) -> AppResult<u32> {
     let conn = db.get_connection()?;
@@ -445,9 +450,11 @@ pub async fn backfill_cover_thumbnails(db: State<'_, crate::db::Database>) -> Ap
                         (fanart IS NOT NULL AND fanart <> '')
                      OR (thumb IS NOT NULL AND thumb <> '')
                      OR (poster IS NOT NULL AND poster <> '')
-                   )",
+                   )
+                   AND (cover_thumb_attempted_at IS NULL
+                        OR cover_thumb_attempted_at < datetime('now', ?1))",
             )?;
-            let iter = stmt.query_map([], |row| {
+            let iter = stmt.query_map([BACKFILL_RETRY_AFTER], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -481,20 +488,84 @@ pub async fn backfill_cover_thumbnails(db: State<'_, crate::db::Database>) -> Ap
                 continue;
             };
 
-            let Some(thumb_path) = crate::media::artwork::generate_cover_thumbnail(
+            match crate::media::artwork::generate_cover_thumbnail(
                 std::path::Path::new(source),
                 std::path::Path::new(&dir_path),
                 stem,
-            ) else {
-                continue;
-            };
-
-            conn.execute(
-                "UPDATE videos SET cover_thumb = ? WHERE id = ?",
-                rusqlite::params![thumb_path, id],
-            )?;
-            updated += 1;
+            ) {
+                Some(thumb_path) => {
+                    conn.execute(
+                        "UPDATE videos SET cover_thumb = ?, cover_thumb_attempted_at = datetime('now') WHERE id = ?",
+                        rusqlite::params![thumb_path, id],
+                    )?;
+                    updated += 1;
+                }
+                None => {
+                    conn.execute(
+                        "UPDATE videos SET cover_thumb_attempted_at = datetime('now') WHERE id = ?",
+                        rusqlite::params![id],
+                    )?;
+                }
+            }
         }
+        Ok(updated)
+    })
+    .await
+    .map_err(|e| AppError::TaskJoin(e.to_string()))?
+}
+
+/// 一次性回填旧库的「是否有字幕」列：只处理 `has_subtitle IS NULL` 的记录，按目录分组、
+/// 每目录只 read_dir 一次。之后由扫描/字幕下载维护，列表不再实时探测。
+/// 返回本次回填的记录数。
+#[tauri::command]
+pub async fn backfill_subtitle_flags(
+    app: AppHandle,
+    db: State<'_, crate::db::Database>,
+) -> AppResult<u32> {
+    let settings = crate::settings::get_settings(app.clone()).await.unwrap_or_default();
+    let cfg = crate::media::storage::MetadataStorageConfig::from_settings(&settings);
+    let conn = db.get_connection()?;
+
+    tokio::task::spawn_blocking(move || -> AppResult<u32> {
+        let targets: Vec<(String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT video_path, COALESCE(local_id, '') FROM videos WHERE has_subtitle IS NULL",
+            )?;
+            let iter = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+            let mut list = Vec::new();
+            for item in iter {
+                list.push(item?);
+            }
+            list
+        };
+        if targets.is_empty() {
+            return Ok(0);
+        }
+
+        // 按资产目录分组，同目录多个视频共用一次 read_dir
+        let mut by_dir: HashMap<std::path::PathBuf, Vec<(String, String)>> = HashMap::new();
+        for (video_path, local_id) in targets {
+            let (dir, stem) =
+                crate::media::storage::resolve_existing_asset_dir(&video_path, &local_id, &cfg);
+            by_dir.entry(dir).or_default().push((video_path, stem));
+        }
+
+        let tx = conn.unchecked_transaction()?;
+        let mut updated = 0u32;
+        for (dir, items) in by_dir {
+            let stems = std::fs::read_dir(&dir)
+                .map(|entries| {
+                    let entries: Vec<std::fs::DirEntry> = entries.flatten().collect();
+                    crate::media::assets::collect_subtitle_stems(&entries)
+                })
+                .unwrap_or_default();
+            for (video_path, stem) in items {
+                let has = crate::media::assets::stem_has_matching_subtitle(&stems, &stem);
+                crate::db::Database::set_video_has_subtitle(&tx, &video_path, has)?;
+                updated += 1;
+            }
+        }
+        tx.commit()?;
         Ok(updated)
     })
     .await
@@ -507,8 +578,43 @@ pub async fn get_duplicate_videos(db: State<'_, crate::db::Database>) -> AppResu
     let conn = db.get_connection()?;
 
     tokio::task::spawn_blocking(move || {
+        // 同番号重复：把同一分段组（分段范围目录 + stack_key，与列表 fold_video_stacks 口径一致）
+        // 折成 1 份再计数，避免把同一影片的多个分段（共享番号）误报为可删重复。
+        // 范围目录需按目录名回溯（见 stack_scope_dir），SQL 做不了，先在此算出重复番号集合。
+        let dup_local_ids: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT local_id, video_path, stack_key FROM videos WHERE local_id IS NOT NULL AND local_id != ''",
+            )?;
+            let mut copies: HashMap<String, HashSet<(String, String)>> = HashMap::new();
+            for row in stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })? {
+                let (local_id, video_path, stack_key) = row?;
+                let dir = std::path::Path::new(&video_path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let copy = match stack_key.filter(|k| !k.is_empty()) {
+                    Some(key) => (stack_scope_dir(&dir, &key), key),
+                    None => (dir, video_path),
+                };
+                copies.entry(local_id).or_default().insert(copy);
+            }
+            copies
+                .into_iter()
+                .filter(|(_, copies)| copies.len() > 1)
+                .map(|(local_id, _)| local_id)
+                .collect()
+        };
+
         // 跨目录查找 fast_hash 重复或 local_id（番号）重复的视频
-        let sql = r#"
+        let placeholders = vec!["?"; dup_local_ids.len()].join(",");
+        let sql = format!(
+            r#"
             SELECT
                 v.id,
                 v.title,
@@ -524,22 +630,14 @@ pub async fn get_duplicate_videos(db: State<'_, crate::db::Database>) -> AppResu
             WHERE (v.fast_hash IS NOT NULL AND v.fast_hash != '' AND v.fast_hash IN (
                 SELECT fast_hash FROM videos WHERE fast_hash IS NOT NULL AND fast_hash != '' GROUP BY fast_hash HAVING COUNT(*) > 1
             ))
-            OR (v.local_id IS NOT NULL AND v.local_id != '' AND v.local_id IN (
-                -- 同番号重复：把同一 (dir_path, stack_key) 分段组折成 1 份再计数，
-                -- 避免把同一影片的多个分段（共享番号）误报为可删重复。
-                SELECT local_id FROM (
-                    SELECT local_id
-                    FROM videos
-                    WHERE local_id IS NOT NULL AND local_id != ''
-                    GROUP BY local_id, dir_path, COALESCE(stack_key, video_path)
-                ) GROUP BY local_id HAVING COUNT(*) > 1
-            ))
+            OR v.local_id IN ({placeholders})
             ORDER BY v.local_id, v.fast_hash, v.created_at DESC
-        "#;
+        "#
+        );
 
-        let mut stmt = conn.prepare(sql)?;
+        let mut stmt = conn.prepare(&sql)?;
         let video_iter = stmt
-            .query_map([], |row| {
+            .query_map(rusqlite::params_from_iter(dup_local_ids.iter()), |row| {
                 Ok(serde_json::json!({
                     "id": row.get::<_, String>(0)?,
                     "title": row.get::<_, Option<String>>(1)?,

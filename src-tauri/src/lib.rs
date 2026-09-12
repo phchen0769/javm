@@ -351,6 +351,7 @@ pub fn run() {
             actor::commands::list_favorites,
             video::commands::backfill_cover_dimensions,
             video::commands::backfill_cover_thumbnails,
+            video::commands::backfill_subtitle_flags,
             video::commands::get_duplicate_videos,
             video::commands::delete_video_db,
             video::commands::delete_video_file,

@@ -253,6 +253,8 @@ pub struct MediaWriteOutcome {
     pub cover_produced: bool,
     /// NFO 是否写入成功
     pub nfo_saved: bool,
+    /// 本次是否落地了字幕文件（供调用方写 `has_subtitle` 列）
+    pub subtitle_saved: bool,
     /// 非致命错误（供调用方收集/展示）
     pub errors: Vec<String>,
 }
@@ -327,12 +329,16 @@ pub async fn write_scraped_media(
     };
 
     // 5. 简体中文字幕（best-effort：按番号从 subtitlecat 下载 <stem>.zh.srt，失败不中断）
+    let mut subtitle_saved = false;
     if settings.metadata.auto_download_subtitle && !metadata.local_id.trim().is_empty() {
         match crate::media::subtitle::download_subtitle(&metadata.local_id, &dir, &stem).await {
-            Ok(Some(path)) => log::info!(
-                "[media] event=subtitle_done path={} saved={}",
-                video_path, path.display()
-            ),
+            Ok(Some(path)) => {
+                subtitle_saved = true;
+                log::info!(
+                    "[media] event=subtitle_done path={} saved={}",
+                    video_path, path.display()
+                )
+            }
             Ok(None) => log::info!("[media] event=subtitle_not_found path={}", video_path),
             Err(e) => {
                 log::warn!("[media] event=subtitle_download_failed path={} error={}", video_path, e);
@@ -341,7 +347,7 @@ pub async fn write_scraped_media(
         }
     }
 
-    MediaWriteOutcome { artwork, cover_produced, nfo_saved, errors }
+    MediaWriteOutcome { artwork, cover_produced, nfo_saved, subtitle_saved, errors }
 }
 
 #[cfg(test)]

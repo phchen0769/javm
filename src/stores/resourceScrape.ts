@@ -457,8 +457,9 @@ export const useResourceScrapeStore = defineStore('resourceScrape', () => {
     /** 多源字段级融合刮削：无选择列表的场景（视频详情/批量/下载后自动刮削），
      *  并发查询所有已启用数据源 + MetaTube，按字段融合出一个最完整的最佳结果，
      *  并返回各源诊断（成功/无数据/失败/太慢 + 命中网址），供前端展示与关闭无效源 */
-    async function scrapeFused(code: string): Promise<FusedScrapeResult> {
-        const raw = await invoke<{ result: BackendSearchResult | null; diagnostics: SourceDiagnostic[] }>('rs_scrape_fused', { code })
+    async function scrapeFused(code: string, videoPath?: string): Promise<FusedScrapeResult> {
+        // videoPath 可选：后端从原文件名取 D2Pass 厂牌缩写（carib / 1pon 等）定向刮削源
+        const raw = await invoke<{ result: BackendSearchResult | null; diagnostics: SourceDiagnostic[] }>('rs_scrape_fused', { code, videoPath: videoPath ?? null })
         return {
             result: raw.result ? toResourceItem(raw.result) : null,
             diagnostics: raw.diagnostics ?? [],

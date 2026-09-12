@@ -51,6 +51,10 @@ impl SourceCapability {
     }
 }
 
+/// JSON 接口源的抓取任务（`Send` 以便在 tokio 任务里等待）。
+pub type ApiFetchFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<SearchResult>, String>> + Send>>;
+
 /// 数据源 trait
 ///
 /// 每个数据源实现 `parse(html) -> Option<SearchResult>` 和 `build_url(code) -> String`。
@@ -70,6 +74,11 @@ pub trait Source: Send + Sync {
     /// 无码专用源覆盖为 `UncensoredOnly`，纯有码源覆盖为 `CensoredOnly`。
     fn capability(&self) -> SourceCapability {
         SourceCapability::General
+    }
+    /// JSON 接口源：页面由前端渲染、HTML 里没有数据的站点覆盖此方法，自行请求接口并产出结果
+    /// （`Ok(None)` = 无此番号；结果须自带 `page_url`）。返回 `None` 表示走「抓 HTML → 解析」管线。
+    fn fetch_via_api(&self, _code: &str) -> Option<ApiFetchFuture> {
+        None
     }
 }
 

@@ -401,6 +401,27 @@ async fn fetch_and_parse_source(
     preferred_cover_type: &str,
     cancel: &CancellationToken,
 ) -> SourceFetchOutcome {
+    // JSON 接口源（页面纯前端渲染，HTML 无数据）：直接走接口，取消时立即返回
+    if let Some(api_fetch) = source.fetch_via_api(code) {
+        let fetched = tokio::select! {
+            r = api_fetch => r,
+            _ = cancel.cancelled() => return SourceFetchOutcome::Failed("已取消".to_string()),
+        };
+        return match fetched {
+            Ok(Some(mut result)) => {
+                if !is_valid_search_result(&result) {
+                    return SourceFetchOutcome::Empty;
+                }
+                let page_url = result.page_url.clone();
+                normalize_search_result_urls(&mut result, &page_url);
+                enrich_search_result_detail(&mut result, preferred_cover_type);
+                SourceFetchOutcome::Success(result)
+            }
+            Ok(None) => SourceFetchOutcome::Empty,
+            Err(e) => SourceFetchOutcome::Failed(e),
+        };
+    }
+
     let fetcher = Fetcher::new();
     let url = source.build_url(code);
     let html = match fetcher.fetch(app, &url, site, fetch_options, cancel).await {
@@ -445,23 +466,20 @@ async fn metatube_top_result(
     app: &AppHandle,
     code: &str,
     preferred_cover_type: &str,
+    studio_hint: Option<&str>,
 ) -> Option<SearchResult> {
     let (client, providers) = {
         let manager = app.try_state::<crate::metatube::MetaTubeManager>()?;
         let client = manager.client()?;
-        (client, manager.config().providers)
+        (client, metatube_providers_for(&manager.config().providers, studio_hint))
     };
     let candidates = client.search(code, &providers).await.ok()?;
-    // MetaTube search 为模糊匹配，取番号与查询一致的候选（去除符号大写后比对），
-    // 避免把"最相近"的不相关影片字段并入融合，污染结果。
-    let canon = |s: &str| -> String {
-        s.chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .flat_map(|c| c.to_uppercase())
-            .collect()
-    };
-    let want = canon(code);
-    let top = candidates.into_iter().find(|c| canon(&c.number) == want)?;
+    // MetaTube search 为模糊匹配，取番号与查询一致的候选（去除符号大写后比对；D2Pass 系纯数字番号
+    // 还须分隔符一致，加勒比 110615-001 与一本道 110615_001 是不同影片），
+    // 避免把"最相近"的不相关影片字段并入融合，污染结果。有厂牌线索时只认该 provider 的候选。
+    let top = candidates
+        .into_iter()
+        .find(|c| metatube_candidate_matches(c, code, studio_hint))?;
     let info = client.get_movie(&top.provider, &top.id).await.ok()?;
     let mut result = crate::metatube::client::movie_info_to_search_result(info);
     if !is_valid_search_result(&result) {
@@ -471,6 +489,28 @@ async fn metatube_top_result(
     normalize_search_result_urls(&mut result, &page_url);
     enrich_search_result_detail(&mut result, preferred_cover_type);
     Some(result)
+}
+
+/// MetaTube 搜索的 provider 列表：有 D2Pass 厂牌线索时只查该 provider（同格式番号在各厂牌各有
+/// 一部不同影片，查全部会混入别家的同号影片）；否则沿用设置里的 provider 列表（空则服务端默认全部）。
+fn metatube_providers_for(configured: &[String], studio_hint: Option<&str>) -> Vec<String> {
+    match studio_hint {
+        Some(provider) => vec![provider.to_string()],
+        None => configured.to_vec(),
+    }
+}
+
+/// MetaTube 候选是否就是要找的番号：番号一致（D2Pass 系含分隔符），有厂牌线索时 provider 也须一致
+/// （服务端 fallback 可能带回别家 provider 的同号影片）。
+fn metatube_candidate_matches(
+    cand: &crate::metatube::types::MovieSearchResult,
+    code: &str,
+    studio_hint: Option<&str>,
+) -> bool {
+    if !crate::utils::designation_recognizer::same_designation(&cand.number, code) {
+        return false;
+    }
+    studio_hint.map_or(true, |provider| cand.provider.eq_ignore_ascii_case(provider))
 }
 
 /// 详情融合刮削：按评分取前 N 个源（避免把慢/低质源都拉上拖慢刮削）
@@ -500,14 +540,17 @@ struct SourceMessage {
 pub(crate) async fn scrape_and_fuse(
     app: &AppHandle,
     code: &str,
+    studio_hint: Option<&str>,
     cancel: &CancellationToken,
 ) -> Result<ScrapeFusionOutcome, String> {
     // 与交互搜索 rs_search_resource 对齐：无连字符输入补连字符并归一化（ssis666 → SSIS-666）。
     // 队列/下载传入的已是识别后的大写番号，归一化对其为安全 no-op。
-    let code = normalize_search_code(code);
+    let (code, hint_from_input) = normalize_search_code(code);
     if code.is_empty() {
         return Ok(ScrapeFusionOutcome { result: None, diagnostics: Vec::new() });
     }
+    // D2Pass 厂牌线索：调用方从文件名识别的优先，其次取输入串里的缩写（如 110615_001-1pon）
+    let studio_hint = studio_hint.map(str::to_string).or(hint_from_input);
 
     let settings = settings::get_settings(app.clone()).await.unwrap_or_default();
     let enabled_sites = settings::enabled_scrape_sites(&settings.scrape);
@@ -558,6 +601,14 @@ pub(crate) async fn scrape_and_fuse(
     scrape_sources.sort_by(|a, b| {
         is_default_site(b.name())
             .cmp(&is_default_site(a.name())) // 默认源置顶（true 排前）
+            // 无码作品：无码专用源置顶——综合源多半不收录无码片，它是最可能命中的源，
+            // 不能被评分高的综合源挤出 top-N（评分来自有码刮削，对无码片没有参考意义）
+            .then_with(|| {
+                let specialist = |s: &dyn Source| {
+                    is_uncensored && s.capability() == sources::SourceCapability::UncensoredOnly
+                };
+                specialist(b.as_ref()).cmp(&specialist(a.as_ref()))
+            })
             .then_with(|| score_of(b.name()).cmp(&score_of(a.name())))
             .then_with(|| prio_of(a.name()).cmp(&prio_of(b.name())))
     });
@@ -657,12 +708,14 @@ pub(crate) async fn scrape_and_fuse(
         let cover = preferred_cover_type.clone();
         let cancel = child.clone();
         let tx = tx.clone();
+        let studio_hint = studio_hint.clone();
         tokio::spawn(async move {
             if cancel.is_cancelled() {
                 return;
             }
             let started = std::time::Instant::now();
-            let outcome = match metatube_top_result(&app, &code, &cover).await {
+            let outcome =
+                match metatube_top_result(&app, &code, &cover, studio_hint.as_deref()).await {
                 Some(r) => SourceFetchOutcome::Success(r),
                 None => SourceFetchOutcome::Empty,
             };
@@ -774,9 +827,17 @@ pub struct FusedScrapeResponse {
 /// 详情刮削命令：多源融合产出最佳结果（不入库，供前端填表单/预览）。封面/缩略图代理本地缓存以便展示。
 /// 同时返回各源诊断（成功/无数据/失败/太慢 + 命中网址），供前端展示与关闭无效源。
 #[tauri::command]
-pub async fn rs_scrape_fused(app: AppHandle, code: String) -> Result<FusedScrapeResponse, String> {
+pub async fn rs_scrape_fused(
+    app: AppHandle,
+    code: String,
+    video_path: Option<String>,
+) -> Result<FusedScrapeResponse, String> {
     let cancel = CancellationToken::new();
-    let outcome = scrape_and_fuse(&app, &code, &cancel).await?;
+    // 详情页一键刮削：从原文件名取 D2Pass 厂牌缩写（如 110615_001-1pon-1080p 的 1pon）作定向线索
+    let studio_hint = video_path
+        .as_deref()
+        .and_then(|path| studio_hint_from_path(path, &code));
+    let outcome = scrape_and_fuse(&app, &code, studio_hint.as_deref(), &cancel).await?;
     let diagnostics = outcome.diagnostics;
     let Some(mut result) = outcome.result else {
         return Ok(FusedScrapeResponse { result: None, diagnostics });
@@ -836,25 +897,50 @@ pub async fn rs_scrape_fused(app: AppHandle, code: String) -> Result<FusedScrape
     Ok(FusedScrapeResponse { result: Some(result), diagnostics })
 }
 
-/// 归一化搜索输入番号：补连字符（`ssis666` → `SSIS-666`），让无连字符输入与标准写法
-/// 得到一致的搜索结果。**保守**：仅当识别结果与原输入「去连字符大写后一致」（即只是重整
-/// 连字符、未另抽成别的番号）才采用；否则原样大写返回，避免误伤 FC2-PPV、素人数字前缀等。
-fn normalize_search_code(raw: &str) -> String {
+/// 归一化搜索输入番号：补连字符（`ssis666` → `SSIS-666`），并去掉番号之后的噪声后缀
+/// （`110615-001-carib-1080p` → `110615-001`），让文件名式输入与标准写法得到一致结果。
+/// **保守**：仅当原输入「剔除厂牌缩写、去非字母数字并大写后」以识别结果开头（即只是重整
+/// 分隔符 / 去掉尾部噪声，未另抽成别的番号）才采用；否则原样大写返回，避免误伤 FC2-PPV、
+/// 素人数字前缀（`390jac132` 不可截成 `JAC-132`）等。
+/// 最后统一按厂牌命名怪癖改写成各站收录的正式写法（`bibivr-0169` → `BIBIVR-169`、
+/// `MKBD-094` → `MKBD-S94`，见 [`canonicalize_designation`]），否则各站一律 404。
+/// 同时返回识别到的 D2Pass 厂牌（仅采用识别结果时有值），供 MetaTube 定向 provider。
+fn normalize_search_code(raw: &str) -> (String, Option<String>) {
+    use crate::utils::designation_recognizer::{
+        canonicalize_designation, strip_studio_tags, DesignationRecognizer,
+    };
+
     let trimmed = raw.trim();
     let fallback = trimmed.to_uppercase();
-    let recognizer = crate::utils::designation_recognizer::DesignationRecognizer::new();
-    if let Some(recognized) = recognizer.recognize_with_regex(trimmed) {
-        let canon = |s: &str| -> String {
-            s.chars()
-                .filter(|c| c.is_ascii_alphanumeric())
-                .flat_map(|c| c.to_uppercase())
-                .collect()
-        };
-        if canon(&recognized) == canon(trimmed) {
-            return recognized;
-        }
+    // 用原始写法比对（bibivr-0169 识别为 BIBIVR-0169 才能与输入前缀对上），采用后再改写
+    let Some(info) = DesignationRecognizer::new().recognize_detailed_raw(trimmed) else {
+        return (canonicalize_designation(&fallback), None);
+    };
+    let canon = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .flat_map(|c| c.to_uppercase())
+            .collect()
+    };
+    // 厂牌词是番号的伴随信息而非番号本身，比对前剔除（carib-110615-001 / Tokyo-Hot n0698）
+    let input_canon = canon(&strip_studio_tags(trimmed));
+    if input_canon.starts_with(&canon(&info.designation)) {
+        (canonicalize_designation(&info.designation), info.markers.studio)
+    } else {
+        (canonicalize_designation(&fallback), None)
     }
-    fallback
+}
+
+/// 从视频文件名识别 D2Pass 厂牌线索（carib / 1pon / 10mu / paco 等缩写）。
+/// 仅当文件名识别出的番号与给定番号指向同一作品才返回，避免用户改过番号后套用旧线索。
+fn studio_hint_from_path(video_path: &str, code: &str) -> Option<String> {
+    let stem = std::path::Path::new(video_path).file_stem()?.to_string_lossy();
+    let info = crate::utils::designation_recognizer::DesignationRecognizer::new()
+        .recognize_detailed(&stem)?;
+    if !crate::utils::designation_recognizer::same_designation(&info.designation, code) {
+        return None;
+    }
+    info.markers.studio
 }
 
 /// MetaTube 单次搜索最多贡献的结果数（命中该番号的 provider 候选取前 N 个，避免刷屏/过慢）。
@@ -865,6 +951,7 @@ const MAX_METATUBE_RESULTS: usize = 10;
 async fn run_metatube_search(
     app: &AppHandle,
     code: &str,
+    studio_hint: Option<&str>,
     preferred_cover_type: &str,
     token: &CancellationToken,
     alias_evidence: &std::sync::Arc<std::sync::Mutex<Vec<SourceEvidence>>>,
@@ -877,7 +964,7 @@ async fn run_metatube_search(
         let Some(client) = manager.client() else {
             return; // 未就绪 → 回退跳过
         };
-        (client, manager.config().providers)
+        (client, metatube_providers_for(&manager.config().providers, studio_hint))
     };
 
     let candidates = match client.search(code, &providers).await {
@@ -886,6 +973,14 @@ async fn run_metatube_search(
             log::warn!("[scrape_search] event=metatube_search_failed code={} error={}", code, e);
             return;
         }
+    };
+    // 有厂牌线索时只展示该 provider 的候选，避免混入别家同号影片
+    let candidates: Vec<_> = match studio_hint {
+        Some(provider) => candidates
+            .into_iter()
+            .filter(|c| c.provider.eq_ignore_ascii_case(provider))
+            .collect(),
+        None => candidates,
     };
     if candidates.is_empty() {
         log::info!("[scrape_search] event=metatube_no_result code={}", code);
@@ -1021,8 +1116,8 @@ pub async fn rs_search_resource(
     if trimmed.is_empty() {
         return Err("番号不能为空".to_string());
     }
-    // 归一化：让 ssis666 与 ssis-666 走到同一个正确番号
-    let code = normalize_search_code(trimmed);
+    // 归一化：让 ssis666 与 ssis-666 走到同一个正确番号；顺带取出 D2Pass 厂牌线索（110615_001-1pon）
+    let (code, studio_hint) = normalize_search_code(trimmed);
 
     // 取消上一次搜索
     {
@@ -1182,157 +1277,197 @@ pub async fn rs_search_resource(
                 max_webview_windows: fetch_settings.max_webview_windows,
             };
 
-            match fetcher.fetch(&app, &url, &site, fetch_options, &token).await {
-                Ok(html) => {
-                    // 取消检查
-                    if token.is_cancelled() {
+            // 取得（结果, 详情页地址）：JSON 接口源直接调接口；其余抓 HTML（必要时二次抓详情页）再解析
+            let parsed: Option<(SearchResult, String)> = if let Some(api_fetch) =
+                source.fetch_via_api(&code)
+            {
+                let fetched = tokio::select! {
+                    r = api_fetch => r,
+                    _ = token.cancelled() => {
                         log::info!("[scrape_search] event=result_discarded_cancelled source={}", name);
                         return;
                     }
-
-                    let final_url = url.clone();
-                    log::info!(
-                        "[scrape_search] event=fetch_succeeded source={} final_url={} html_length={} preview={}",
-                        name,
-                        final_url,
-                        html.len(),
-                        preview_html(&html)
-                    );
-
-                    // 检查是否需要二次请求详情页
-                    let (parse_html, page_url) = if let Some(detail) =
-                        source.extract_detail_url(&html, &code)
-                    {
-                        let detail = normalize_result_url(&detail, &final_url);
+                };
+                match fetched {
+                    Ok(Some(result)) => {
                         log::info!(
-                            "[scrape_search] event=detail_fetch_started source={} detail_url={}",
+                            "[scrape_search] event=api_fetch_succeeded source={} page_url={}",
                             name,
-                            detail
+                            result.page_url
                         );
-                        match fetcher.fetch(&app, &detail, &site, fetch_options, &token).await {
-                            Ok(dh) => {
-                                log::info!(
-                                    "[scrape_search] event=detail_fetch_succeeded source={} detail_url={} html_length={} preview={}",
-                                    name,
-                                    detail,
-                                    dh.len(),
-                                    preview_html(&dh)
-                                );
-                                (dh, detail)
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "[scrape_search] event=detail_fetch_failed source={} detail_url={} fallback=search_page error={}",
-                                    name,
-                                    detail,
-                                    e
-                                );
-                                (html, final_url.clone())
-                            }
-                        }
-                    } else {
-                        (html, final_url.clone())
-                    };
-
-                    if let Some(mut result) = source.parse(&parse_html, &code) {
-                        if !is_valid_search_result(&result) {
-                            log::warn!(
-                                "[scrape_search] event=result_filtered_invalid source={} title={}",
-                                name,
-                                result.title
-                            );
-                        } else {
-                        result.page_url = page_url.clone();
-                        normalize_search_result_urls(&mut result, &page_url);
-
-                        if !result.thumbs.is_empty() {
-                            let (display_thumbs, remote_thumbs) = proxy_preview_images_to_files(
-                                &client,
-                                &result.thumbs,
-                                page_url.as_str(),
-                            )
-                            .await;
-                            result.thumbs = display_thumbs;
-                            result.remote_thumb_urls = remote_thumbs;
+                        let page_url = result.page_url.clone();
+                        Some((result, page_url))
+                    }
+                    Ok(None) => {
+                        log::warn!("[scrape_search] event=parse_empty source={} code={}", name, code);
+                        None
+                    }
+                    Err(e) => {
+                        log::error!("[scrape_search] event=fetch_failed source={} code={} url={} error={}", name, code, url, e);
+                        None
+                    }
+                }
+            } else {
+                match fetcher.fetch(&app, &url, &site, fetch_options, &token).await {
+                    Ok(html) => {
+                        // 取消检查
+                        if token.is_cancelled() {
+                            log::info!("[scrape_search] event=result_discarded_cancelled source={}", name);
+                            return;
                         }
 
-                        // 对防盗链图片做后端代理（下载到临时文件，返回本地路径）
-                        if result.cover_url.starts_with("http://")
-                            || result.cover_url.starts_with("https://")
+                        let final_url = url.clone();
+                        log::info!(
+                            "[scrape_search] event=fetch_succeeded source={} final_url={} html_length={} preview={}",
+                            name,
+                            final_url,
+                            html.len(),
+                            preview_html(&html)
+                        );
+
+                        // 检查是否需要二次请求详情页
+                        let (parse_html, page_url) = if let Some(detail) =
+                            source.extract_detail_url(&html, &code)
                         {
-                            match proxy_image_to_file(&client, &result.cover_url).await
-                            {
-                                Ok(local_path) => {
-                                    // 保留原始远程 URL，同时提供本地缓存路径
-                                    result.remote_cover_url = Some(result.cover_url.clone());
-                                    // 探测封面方向用于评分（基于已下载到本地的封面文件）
-                                    result.cover_orientation = detect_cover_orientation(&local_path);
-                                    result.cover_url = local_path;
+                            let detail = normalize_result_url(&detail, &final_url);
+                            log::info!(
+                                "[scrape_search] event=detail_fetch_started source={} detail_url={}",
+                                name,
+                                detail
+                            );
+                            match fetcher.fetch(&app, &detail, &site, fetch_options, &token).await {
+                                Ok(dh) => {
+                                    log::info!(
+                                        "[scrape_search] event=detail_fetch_succeeded source={} detail_url={} html_length={} preview={}",
+                                        name,
+                                        detail,
+                                        dh.len(),
+                                        preview_html(&dh)
+                                    );
+                                    (dh, detail)
                                 }
                                 Err(e) => {
                                     log::warn!(
-                                        "[scrape_search] event=cover_proxy_failed source={} cover_url={} error={}",
+                                        "[scrape_search] event=detail_fetch_failed source={} detail_url={} fallback=search_page error={}",
                                         name,
-                                        result.cover_url,
+                                        detail,
                                         e
                                     );
+                                    (html, final_url.clone())
                                 }
                             }
-                        }
-                        log::info!(
-                            "[scrape_search] event=parse_succeeded source={} title={} page_url={}",
-                            name,
-                            result.title,
-                            page_url
-                        );
-
-                        // 收集同番号关联证据（用原始未翻译名，翻译会污染语言归属）
-                        {
-                            let studios: Vec<String> = [result.studio.trim(), result.maker.trim()]
-                                .into_iter()
-                                .filter(|s| !s.is_empty())
-                                .map(|s| s.to_string())
-                                .collect();
-                            let actors: Vec<String> = result
-                                .actors
-                                .split(['、', ',', '，'])
-                                .map(|a| a.trim().to_string())
-                                .filter(|a| !a.is_empty())
-                                .collect();
-                            if !studios.is_empty() || !actors.is_empty() {
-                                if let Ok(mut guard) = alias_evidence.lock() {
-                                    guard.push(SourceEvidence {
-                                        source: name.clone(),
-                                        studios,
-                                        actors,
-                                    });
-                                }
-                            }
-                        }
-
-                        // 如果开启了翻译，先翻译再 emit 给前端
-                        let mut result_to_emit = match crate::utils::ai_translator::translate_search_result(&app, &result).await {
-                            Ok(translated) => {
-                                log::info!("[scrape_search] event=translation_applied source={}", name);
-                                translated
-                            }
-                            Err(e) => {
-                                log::warn!("[scrape_search] event=translation_skipped source={} error={}", name, e);
-                                result
-                            }
+                        } else {
+                            (html, final_url.clone())
                         };
-                        enrich_search_result_detail(&mut result_to_emit, &preferred_cover_type);
-                        if !token.is_cancelled() {
-                            let _ = app.emit("search-result", &result_to_emit);
+
+                        match source.parse(&parse_html, &code) {
+                            Some(result) => Some((result, page_url)),
+                            None => {
+                                log::warn!("[scrape_search] event=parse_empty source={} code={}", name, code);
+                                None
+                            }
                         }
-                        }
-                    } else {
-                        log::warn!("[scrape_search] event=parse_empty source={} code={}", name, code);
+                    }
+                    Err(e) => {
+                        log::error!("[scrape_search] event=fetch_failed source={} code={} url={} error={}", name, code, url, e);
+                        None
                     }
                 }
-                Err(e) => {
-                    log::error!("[scrape_search] event=fetch_failed source={} code={} url={} error={}", name, code, url, e);
+            };
+
+            let Some((mut result, page_url)) = parsed else {
+                return;
+            };
+            if !is_valid_search_result(&result) {
+                log::warn!(
+                    "[scrape_search] event=result_filtered_invalid source={} title={}",
+                    name,
+                    result.title
+                );
+                return;
+            }
+            result.page_url = page_url.clone();
+            normalize_search_result_urls(&mut result, &page_url);
+
+            if !result.thumbs.is_empty() {
+                let (display_thumbs, remote_thumbs) = proxy_preview_images_to_files(
+                    &client,
+                    &result.thumbs,
+                    page_url.as_str(),
+                )
+                .await;
+                result.thumbs = display_thumbs;
+                result.remote_thumb_urls = remote_thumbs;
+            }
+
+            // 对防盗链图片做后端代理（下载到临时文件，返回本地路径）
+            if result.cover_url.starts_with("http://")
+                || result.cover_url.starts_with("https://")
+            {
+                match proxy_image_to_file(&client, &result.cover_url).await
+                {
+                    Ok(local_path) => {
+                        // 保留原始远程 URL，同时提供本地缓存路径
+                        result.remote_cover_url = Some(result.cover_url.clone());
+                        // 探测封面方向用于评分（基于已下载到本地的封面文件）
+                        result.cover_orientation = detect_cover_orientation(&local_path);
+                        result.cover_url = local_path;
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[scrape_search] event=cover_proxy_failed source={} cover_url={} error={}",
+                            name,
+                            result.cover_url,
+                            e
+                        );
+                    }
                 }
+            }
+            log::info!(
+                "[scrape_search] event=parse_succeeded source={} title={} page_url={}",
+                name,
+                result.title,
+                page_url
+            );
+
+            // 收集同番号关联证据（用原始未翻译名，翻译会污染语言归属）
+            {
+                let studios: Vec<String> = [result.studio.trim(), result.maker.trim()]
+                    .into_iter()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
+                let actors: Vec<String> = result
+                    .actors
+                    .split(['、', ',', '，'])
+                    .map(|a| a.trim().to_string())
+                    .filter(|a| !a.is_empty())
+                    .collect();
+                if !studios.is_empty() || !actors.is_empty() {
+                    if let Ok(mut guard) = alias_evidence.lock() {
+                        guard.push(SourceEvidence {
+                            source: name.clone(),
+                            studios,
+                            actors,
+                        });
+                    }
+                }
+            }
+
+            // 如果开启了翻译，先翻译再 emit 给前端
+            let mut result_to_emit = match crate::utils::ai_translator::translate_search_result(&app, &result).await {
+                Ok(translated) => {
+                    log::info!("[scrape_search] event=translation_applied source={}", name);
+                    translated
+                }
+                Err(e) => {
+                    log::warn!("[scrape_search] event=translation_skipped source={} error={}", name, e);
+                    result
+                }
+            };
+            enrich_search_result_detail(&mut result_to_emit, &preferred_cover_type);
+            if !token.is_cancelled() {
+                let _ = app.emit("search-result", &result_to_emit);
             }
         });
         handles.push(handle);
@@ -1342,11 +1477,20 @@ pub async fn rs_search_resource(
     if run_metatube {
         let app = app.clone();
         let code = code.clone();
+        let studio_hint = studio_hint.clone();
         let token = token.clone();
         let alias_evidence = alias_evidence.clone();
         let preferred_cover_type = preferred_cover_type.clone();
         let handle = tokio::spawn(async move {
-            run_metatube_search(&app, &code, &preferred_cover_type, &token, &alias_evidence).await;
+            run_metatube_search(
+                &app,
+                &code,
+                studio_hint.as_deref(),
+                &preferred_cover_type,
+                &token,
+                &alias_evidence,
+            )
+            .await;
         });
         handles.push(handle);
     }
@@ -1656,20 +1800,74 @@ mod tests {
     #[test]
     fn search_code_inserts_missing_hyphen() {
         // 核心修复：无连字符与标准写法归一到同一番号
-        assert_eq!(normalize_search_code("ssis666"), "SSIS-666");
-        assert_eq!(normalize_search_code("ssis-666"), "SSIS-666");
-        assert_eq!(normalize_search_code("SSIS-666"), "SSIS-666");
-        assert_eq!(normalize_search_code("  ssis666  "), "SSIS-666");
+        assert_eq!(normalize_search_code("ssis666").0, "SSIS-666");
+        assert_eq!(normalize_search_code("ssis-666").0, "SSIS-666");
+        assert_eq!(normalize_search_code("SSIS-666").0, "SSIS-666");
+        assert_eq!(normalize_search_code("  ssis666  ").0, "SSIS-666");
     }
 
     #[test]
     fn search_code_preserves_special_forms() {
         // 保守：不把 FC2-PPV 抽成 FC2-xxx，原样保留（仅大写）
-        assert_eq!(normalize_search_code("FC2-PPV-1234567"), "FC2-PPV-1234567");
+        assert_eq!(normalize_search_code("FC2-PPV-1234567").0, "FC2-PPV-1234567");
         // 素人数字前缀无连字符时不被截成 JAC-132，原样保留
-        assert_eq!(normalize_search_code("390jac132"), "390JAC132");
+        assert_eq!(normalize_search_code("390jac132").0, "390JAC132");
         // 已规范的素人写法保持
-        assert_eq!(normalize_search_code("390JAC-132"), "390JAC-132");
+        assert_eq!(normalize_search_code("390JAC-132").0, "390JAC-132");
+        // 前置噪声仍保守原样返回（不另抽番号）
+        assert_eq!(normalize_search_code("20231231SSIS-001").0, "20231231SSIS-001");
+    }
+
+    #[test]
+    fn search_code_strips_trailing_noise_and_reads_studio_tag() {
+        // 文件名式输入：番号之后的厂牌缩写/分辨率是噪声，去掉后按纯番号搜索，厂牌作定向线索
+        assert_eq!(
+            normalize_search_code("110615-001-carib-1080p"),
+            ("110615-001".to_string(), Some("Caribbeancom".to_string()))
+        );
+        assert_eq!(
+            normalize_search_code("110615_001-1pon-1080p"),
+            ("110615_001".to_string(), Some("1Pondo".to_string()))
+        );
+        // 厂牌缩写在前同样可用
+        assert_eq!(
+            normalize_search_code("carib-110615-001"),
+            ("110615-001".to_string(), Some("Caribbeancom".to_string()))
+        );
+        // 纯番号：分隔符原样保留，无厂牌线索
+        assert_eq!(normalize_search_code("110615_001"), ("110615_001".to_string(), None));
+        // 有码番号的尾部标记同样去掉
+        assert_eq!(normalize_search_code("SSIS-001-C").0, "SSIS-001");
+    }
+
+    #[test]
+    fn search_code_handles_tokyohot_and_bare_fc2() {
+        // Tokyo-Hot：厂牌词 + 单字母 4 位数字，归一为 N0698 并带厂牌线索
+        assert_eq!(
+            normalize_search_code("Tokyo-Hot n0698"),
+            ("N0698".to_string(), Some("TOKYO-HOT".to_string()))
+        );
+        assert_eq!(normalize_search_code("n0698"), ("N0698".to_string(), None));
+        // FC2 不带 PPV：归一为 FC2-数字，不截成伪番号
+        assert_eq!(normalize_search_code("FC2-821825").0, "FC2-821825");
+        assert_eq!(normalize_search_code("fc2-821825").0, "FC2-821825");
+    }
+
+    #[test]
+    fn search_code_rewrites_label_quirks() {
+        // 用户实际文件名：四位补零 / Kirari 序号带 S，各站只收录正式写法
+        assert_eq!(normalize_search_code("bibivr-0169").0, "BIBIVR-169");
+        assert_eq!(normalize_search_code("MKBD-094").0, "MKBD-S94");
+        // 手输的两位序号识别不出番号，走原样兜底后同样改写
+        assert_eq!(normalize_search_code("MKBD-94").0, "MKBD-S94");
+        assert_eq!(normalize_search_code("mkbd-s94").0, "MKBD-S94");
+        // HEYZO 本身四位补零，不去零
+        assert_eq!(normalize_search_code("HEYZO-0169").0, "HEYZO-0169");
+        // 前缀本身带连字符：整体保留，不截成 AV-20845
+        assert_eq!(normalize_search_code("xxx-av-20845").0, "XXX-AV-20845");
+        // 带尾部标记的补零写法：先按原写法去掉噪声，再改写
+        assert_eq!(normalize_search_code("bibivr-0169-C").0, "BIBIVR-169");
+        assert_eq!(normalize_search_code("SIVR-00123-C").0, "SIVR-123");
     }
 
     #[test]
@@ -1770,13 +1968,22 @@ pub(crate) fn prepare_video_for_scrape_save_with_target_title(
             relocated.fanart.as_deref(),
         )
         .map_err(|e| e.to_string())?;
+        // 分段影片：同组其它段随之搬进了组目录，同步它们的库内路径
+        let moved_siblings: Vec<(String, String)> = relocated
+            .moved_siblings
+            .iter()
+            .map(|s| (s.original_video_path.clone(), s.video_path.clone()))
+            .collect();
+        crate::db::Database::update_stack_sibling_locations(&conn, &relocated.dir_path, &moved_siblings)
+            .map_err(|e| e.to_string())?;
 
         log::info!(
-            "[scrape_save] event=normalized_to_named_parent video_id={} original_video_path={} video_path={} dir_path={}",
+            "[scrape_save] event=normalized_to_named_parent video_id={} original_video_path={} video_path={} dir_path={} moved_siblings={}",
             video_id,
             relocated.original_video_path,
             relocated.video_path,
-            relocated.dir_path
+            relocated.dir_path,
+            moved_siblings.len()
         );
 
         return Ok(PreparedScrapeVideo {
@@ -1873,7 +2080,7 @@ pub async fn rs_scrape_save(
     // 步骤 4: 更新数据库（失败不中断）
     {
         let writer = super::database_writer::DatabaseWriter::new(&db);
-        match writer.write_all(video_id.clone(), scrape_meta, outcome.artwork).await {
+        match writer.write_all(video_id.clone(), scrape_meta, outcome.artwork, outcome.subtitle_saved).await {
             Ok(_) => {
                 result.db_updated = true;
                 log::info!("[scrape_save] event=db_updated video_id={} path={}", video_id, video_path);
@@ -1992,8 +2199,43 @@ pub async fn rs_create_filtered_scrape_tasks(
             .collect();
         drop(stmt2);
 
-        let mut result = Vec::new();
+        // 按 (分段范围目录, stack_key) 折叠合集：同番号的多个分段（如 STARS-818-01/02/03）只取代表段
+        // （段序号最小者，序号相同按路径稳定）建一个任务，与媒体库 fold_video_stacks 的折叠口径一致
+        // （各段可能分处以段名命名的子目录，见 stack_scope_dir）。
+        // 避免对同一番号的多段重复联网刮削（独立目录模式下多段还会互相覆盖同名 .strm）。
+        // 无分段后缀的文件（parse_stack_part 返回 None）各自独立保留。
+        let mut stack_reps: std::collections::HashMap<(String, String), (i64, String)> =
+            std::collections::HashMap::new();
+        let mut candidate_files: Vec<String> = Vec::new();
         for file_path in files {
+            let stem = std::path::Path::new(&file_path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            match crate::utils::designation_recognizer::parse_stack_part(&stem) {
+                Some((base, idx)) => {
+                    let dir = std::path::Path::new(&file_path)
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let scope = crate::utils::designation_recognizer::stack_scope_dir(&dir, &base);
+                    stack_reps
+                        .entry((scope, base))
+                        .and_modify(|(cur_idx, cur_path)| {
+                            if idx < *cur_idx || (idx == *cur_idx && file_path < *cur_path) {
+                                *cur_idx = idx;
+                                *cur_path = file_path.clone();
+                            }
+                        })
+                        .or_insert_with(|| (idx, file_path.clone()));
+                }
+                None => candidate_files.push(file_path),
+            }
+        }
+        candidate_files.extend(stack_reps.into_values().map(|(_, path)| path));
+
+        let mut result = Vec::new();
+        for file_path in candidate_files {
             // 跳过已有活跃任务的视频
             if active_paths.contains(&file_path) {
                 continue;

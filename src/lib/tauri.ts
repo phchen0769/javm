@@ -69,6 +69,11 @@ export async function backfillCoverThumbnails(): Promise<number> {
     return tauriInvoke<number>('backfill_cover_thumbnails')
 }
 
+/** 一次性回填旧库的「是否有字幕」标记（仅处理尚未探测的记录），返回回填数量 */
+export async function backfillSubtitleFlags(): Promise<number> {
+    return tauriInvoke<number>('backfill_subtitle_flags')
+}
+
 /** 鑾峰彇鍗曚釜瑙嗛璇︽儏 */
 export async function getVideo(id: string): Promise<Video> {
     return tauriInvoke<Video>('get_video', { id })

@@ -249,6 +249,9 @@ impl Database {
                 cover_thumb TEXT,
                 stack_key TEXT,
                 part_index INTEGER,
+                has_subtitle INTEGER,
+                cover_dims_attempted_at TEXT,
+                cover_thumb_attempted_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 scraped_at TEXT
@@ -266,6 +269,12 @@ impl Database {
         // 兼容旧库：补分段归并列（同一影片切分成多文件时，stack_key=去分段后缀基名，part_index=段序号）。
         let _ = conn.execute("ALTER TABLE videos ADD COLUMN stack_key TEXT", []);
         let _ = conn.execute("ALTER TABLE videos ADD COLUMN part_index INTEGER", []);
+        // 兼容旧库：补「是否有字幕」列（扫描/字幕下载时维护；NULL=尚未探测，由一次性回填补齐）。
+        // 之前列表每次加载都对每个视频 read_dir 探测字幕，在 SMB/USB 库上是主要卡顿来源。
+        let _ = conn.execute("ALTER TABLE videos ADD COLUMN has_subtitle INTEGER", []);
+        // 兼容旧库：补封面尺寸/缩略图回填的最近尝试时间，失败项不再每次启动重试（7 天后才再试）。
+        let _ = conn.execute("ALTER TABLE videos ADD COLUMN cover_dims_attempted_at TEXT", []);
+        let _ = conn.execute("ALTER TABLE videos ADD COLUMN cover_thumb_attempted_at TEXT", []);
         log::info!("[db] event=create_videos_table_succeeded");
 
         // 3. 关联表

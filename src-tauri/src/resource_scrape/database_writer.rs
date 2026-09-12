@@ -116,6 +116,7 @@ impl DatabaseWriter {
                     || crate::utils::designation_recognizer::is_uncensored_designation(
                         &metadata.local_id,
                     ),
+                subtitle_saved: false,
             };
 
             Database::update_video_scrape_info(&conn, &video_id, &update).map_err(|e| e.to_string())?;
@@ -230,6 +231,7 @@ impl DatabaseWriter {
         video_id: String,
         metadata: ScrapeMetadata,
         artwork: crate::media::artwork::ArtworkResult,
+        subtitle_saved: bool,
     ) -> Result<(), String> {
         let db_path = self.db_path.clone();
 
@@ -265,6 +267,7 @@ impl DatabaseWriter {
                     || crate::utils::designation_recognizer::is_uncensored_designation(
                         &metadata.local_id,
                     ),
+                subtitle_saved,
             };
             Database::update_video_scrape_info(&tx, &video_id, &update)
                 .map_err(|e| e.to_string())?;

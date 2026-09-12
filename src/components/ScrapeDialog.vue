@@ -138,34 +138,33 @@ const saveData = async (shouldClose: boolean = true) => {
   }
 }
 
-// 从标题中提取番号的函数
-const extractLocalIdFromTitle = (title: string): string => {
-  if (!title) return ''
+// 文件名（去掉目录与扩展名）
+const fileStem = (path: string): string => {
+  const name = path.split(/[/\\]/).pop() ?? ''
+  return name.replace(/\.[^/.]+$/, '')
+}
 
-  // 常见的番号格式：ABC-123, ABC123, ABCD-123 等
-  // 支持多种格式：字母+数字，字母-数字，字母数字混合
-  const patterns = [
-    /([A-Z]{2,6}[-_]?\d{3,5})/i,  // ABC-123, ABC123, ABCD-1234
-    /([A-Z]+\d+[A-Z]*)/i,          // ABC123, T28-123
-    /(\d{6}[-_]\d{3})/,            // 数字格式 123456-789
-  ]
+// 每次打开弹窗递增，用于丢弃上一轮尚未返回的自动识别结果
+let recognizeSession = 0
 
-  for (const pattern of patterns) {
-    const match = title.match(pattern)
-    if (match) {
-      // 标准化格式：确保有连字符
-      let localId = match[1].toUpperCase()
-      // 如果没有连字符，尝试在字母和数字之间添加
-      if (!localId.includes('-') && !localId.includes('_')) {
-        localId = localId.replace(/([A-Z]+)(\d+)/, '$1-$2')
-      }
-      // 将下划线替换为连字符
-      localId = localId.replace(/_/g, '-')
-      return localId
+// 自动识别番号（后端正则，与批量队列/详情页同一套识别器；静默执行，失败不提示）。
+// 不再用前端简化正则：它会把 110615_001-1pon-1080p 截成 PON-1080、把一本道的
+// 110615_001 改写成加勒比的 110615-001、把 390JAC-132 截成 JAC-132。
+const autoRecognizeLocalId = async (title: string) => {
+  const session = recognizeSession
+  try {
+    const result = await invoke<{ success: boolean; designation: string | null }>('recognize_designation_with_ai', {
+      title,
+      forceAi: false,
+    })
+    // 弹窗已重开或用户已手动填入番号时，丢弃过期结果
+    if (session !== recognizeSession || !open.value || localId.value) return
+    if (result.success && result.designation) {
+      localId.value = result.designation
     }
+  } catch (e) {
+    console.error('自动识别番号失败:', e)
   }
-
-  return ''
 }
 
 // Expose open method
@@ -176,6 +175,7 @@ const openDialog = (video: any) => {
   scrapeStore.reset()
   selectedResult.value = null
   loading.value = false
+  recognizeSession++
 
   if (typeof video === 'string') {
     // Backward compatibility or manual localId input
@@ -184,19 +184,15 @@ const openDialog = (video: any) => {
     videoId.value = ''
     videoPath.value = ''
   } else {
-    // 设置原标题（通常是文件名）
-    originalTitle.value = video.title || video.name || ''
     videoId.value = video.id || ''
     videoPath.value = video.path || video.videoPath || ''
+    // 原标题取文件名：刮削后 title 已被替换为刮削标题，只有文件名才稳定含番号；无路径时退回传入标题
+    originalTitle.value = fileStem(videoPath.value) || video.title || video.name || ''
 
-    // 如果有视频标题，自动提取番号
-    if (originalTitle.value) {
-      const extractedLocalId = extractLocalIdFromTitle(originalTitle.value)
-      // 优先使用提取的番号，如果提取失败则使用传入的 localId
-      localId.value = extractedLocalId || video.localId || ''
-    } else {
-      // 没有标题时使用传入的 localId
-      localId.value = video.localId || ''
+    // 默认番号优先取库中已识别/已刮削/用户改过的番号（与详情页一致），缺失时才从文件名识别
+    localId.value = video.localId || ''
+    if (!localId.value && originalTitle.value) {
+      void autoRecognizeLocalId(originalTitle.value)
     }
   }
 

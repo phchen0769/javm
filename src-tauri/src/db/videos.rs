@@ -66,6 +66,7 @@ impl Database {
                 cover_height = ?,
                 is_uncensored = ?,
                 cover_thumb = NULL,
+                has_subtitle = CASE WHEN ? THEN 1 ELSE has_subtitle END,
                 scan_status = 2,
                 scraped_at = datetime('now'),
                 updated_at = datetime('now')
@@ -85,8 +86,18 @@ impl Database {
                 data.cover_width,
                 data.cover_height,
                 data.is_uncensored as i32,
+                data.subtitle_saved,
                 video_id
             ],
+        )?;
+        Ok(())
+    }
+
+    /// 更新「是否有字幕」标记（字幕手动下载成功 / 扫描探测后维护，列表不再实时探测文件系统）
+    pub fn set_video_has_subtitle(conn: &Connection, video_path: &str, has_subtitle: bool) -> Result<()> {
+        conn.execute(
+            "UPDATE videos SET has_subtitle = ? WHERE video_path = ?",
+            params![has_subtitle, video_path],
         )?;
         Ok(())
     }
@@ -137,6 +148,50 @@ impl Database {
         Ok(())
     }
 
+    /// 分段影片随组搬进组目录后，同步同组其它段的库内路径（按原路径定位，`moved` 为原路径 → 新路径）。
+    /// 图集路径原在该段所在目录下的一并改写到新目录（图随段搬走了）；尚未入库的段跳过，等下次扫描按新位置入库。
+    pub fn update_stack_sibling_locations(
+        conn: &Connection,
+        new_dir_path: &str,
+        moved: &[(String, String)],
+    ) -> Result<()> {
+        for (old_video_path, new_video_path) in moved {
+            let row: Option<(String, Option<String>, Option<String>, Option<String>)> = conn
+                .query_row(
+                    "SELECT id, poster, thumb, fanart FROM videos WHERE video_path = ?1",
+                    params![old_video_path],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+            let Some((video_id, poster, thumb, fanart)) = row else {
+                continue;
+            };
+            let old_dir = std::path::Path::new(old_video_path).parent();
+            let remap = |asset: Option<String>| -> Option<String> {
+                asset.map(|path| {
+                    match old_dir.and_then(|dir| std::path::Path::new(&path).strip_prefix(dir).ok()) {
+                        Some(rest) => std::path::Path::new(new_dir_path)
+                            .join(rest)
+                            .to_string_lossy()
+                            .to_string(),
+                        None => path,
+                    }
+                })
+            };
+            Self::update_video_file_location(
+                conn,
+                &video_id,
+                old_video_path,
+                new_video_path,
+                new_dir_path,
+                remap(poster).as_deref(),
+                remap(thumb).as_deref(),
+                remap(fanart).as_deref(),
+            )?;
+        }
+        Ok(())
+    }
+
     /// 预加载目录下所有已有视频的扫描信息到 HashMap，避免逐个查询
     pub fn get_existing_video_scan_info_map(
         conn: &Connection,
@@ -147,7 +202,7 @@ impl Database {
                 video_path, id, title, original_title, studio, premiered, director,
                 local_id, rating, file_size, fast_hash, duration, resolution,
                 file_mtime, nfo_mtime, poster_mtime, thumb_mtime, fanart_mtime,
-                poster, thumb, fanart, scan_status, stack_key, part_index
+                poster, thumb, fanart, scan_status, stack_key, part_index, has_subtitle
             FROM videos
             WHERE dir_path LIKE ? || '%'"
         )?;
@@ -178,6 +233,7 @@ impl Database {
                     scan_status: row.get::<_, Option<i32>>(21)?.unwrap_or(1),
                     stack_key: row.get(22)?,
                     part_index: row.get(23)?,
+                    has_subtitle: row.get::<_, Option<i64>>(24)?.map(|v| v != 0),
                 },
             ))
         })?;
@@ -268,7 +324,8 @@ impl Database {
                 fanart_mtime = ?21,
                 scan_status = ?22,
                 stack_key = ?23,
-                part_index = ?24
+                part_index = ?24,
+                has_subtitle = ?25
             WHERE video_path = ?1",
             params![
                 data.path_str,
@@ -294,7 +351,8 @@ impl Database {
                 data.fanart_mtime,
                 data.scan_status,
                 data.stack_key,
-                data.part_index
+                data.part_index,
+                data.has_subtitle
             ],
         )?;
         Ok(())
@@ -308,8 +366,8 @@ impl Database {
                 file_size, fast_hash, created_at, updated_at, scan_status,
                 duration, resolution, rating, poster, thumb, fanart,
                 file_mtime, nfo_mtime, poster_mtime, thumb_mtime, fanart_mtime,
-                cover_width, cover_height, stack_key, part_index
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
+                cover_width, cover_height, stack_key, part_index, has_subtitle
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
             params![
                 data.id,
                 data.local_id,
@@ -338,7 +396,8 @@ impl Database {
                 data.cover_width,
                 data.cover_height,
                 data.stack_key,
-                data.part_index
+                data.part_index,
+                data.has_subtitle
             ],
         )?;
         Ok(())

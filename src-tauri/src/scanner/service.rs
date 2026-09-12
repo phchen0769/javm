@@ -242,14 +242,19 @@ impl ScannerService {
 
         let mut summary = ScanSummary::default();
 
-        for entry in entries {
-            let entry = match entry {
-                Ok(e) => e,
+        // 目录项只列一次；同目录的字幕 stem 供下方各视频判断 has_subtitle，避免逐视频再 read_dir
+        let entries: Vec<std::fs::DirEntry> = entries
+            .filter_map(|entry| match entry {
+                Ok(e) => Some(e),
                 Err(e) => {
                     log::warn!("[scanner] event=read_dir_entry_failed dir={} error={}", dir.display(), e);
-                    continue;
+                    None
                 }
-            };
+            })
+            .collect();
+        let subtitle_stems = crate::media::assets::collect_subtitle_stems(&entries);
+
+        for entry in entries {
             let path = entry.path();
 
             // 跳过符号链接，防止指向祖先目录的链接导致无限递归/栈溢出
@@ -278,7 +283,7 @@ impl ScannerService {
                 summary.success_count += child_summary.success_count;
                 summary.failed_count += child_summary.failed_count;
             } else {
-                match Self::process_file(&path, tx, existing, existing_map, cover_tx, media_cache) {
+                match Self::process_file(&path, tx, existing, existing_map, cover_tx, media_cache, &subtitle_stems) {
                     Ok(true) => {
                         summary.success_count += 1;
                         *current += 1;
@@ -314,6 +319,8 @@ impl ScannerService {
     ///
     /// 如果视频没有封面（poster 和 thumb 都不存在），
     /// 通过 `cover_tx` 发送截帧任务，由异步 dispatcher 并行生成封面。
+    ///
+    /// `subtitle_stems`：所在目录的字幕文件 stem（小写），由调用方一次 read_dir 得到。
     fn process_file(
         file_path: &Path,
         tx: &Transaction,
@@ -321,6 +328,7 @@ impl ScannerService {
         existing_map: &mut HashMap<String, crate::db::ExistingVideoScanInfo>,
         cover_tx: Option<&CoverTaskSender>,
         media_cache: &HashMap<String, PreparedMedia>,
+        subtitle_stems: &[String],
     ) -> Result<bool, String> {
         if !should_scan_as_video(file_path) {
             return Ok(false);
@@ -406,6 +414,13 @@ impl ScannerService {
         let sibling_scraped =
             nfo_mtime.is_some() && (poster.is_some() || thumb.is_some() || fanart.is_some());
 
+        // 同级字幕（跟随视频模式的落地位置）；独立目录模式下字幕不在同级，扫描看不到，
+        // 故仅在「同级探测为有」或库内尚未记录时写入，不把独立目录已下载的字幕标记回退为无。
+        let sibling_has_subtitle =
+            crate::media::assets::stem_has_matching_subtitle(subtitle_stems, &filename);
+        let has_subtitle = sibling_has_subtitle
+            || existing.as_ref().and_then(|e| e.has_subtitle).unwrap_or(false);
+
         if let Some(existing_info) = existing.as_ref() {
             let unchanged = existing_info.file_size == file_size
                 && existing_info.file_mtime == file_mtime
@@ -416,6 +431,11 @@ impl ScannerService {
 
             if unchanged {
                 existing_paths.remove(&path_str);
+                // 字幕标记：旧库未探测(NULL)或同级新出现字幕时补写，避免列表实时探测
+                if existing_info.has_subtitle != Some(has_subtitle) {
+                    Database::set_video_has_subtitle(tx, &path_str, has_subtitle)
+                        .map_err(|e| format!("更新字幕标记失败 '{}': {}", path_str, e))?;
+                }
                 // 自愈历史误判：旧规则仅认 poster，「NFO + 仅横版封面」被标为未刮削(1)。
                 // 内容未变时若同级已具备 NFO+任一封面，将 1 升级为已完成(2)，只升不降、不动失败态(3/4)。
                 if existing_info.scan_status == 1 && sibling_scraped {
@@ -587,6 +607,7 @@ impl ScannerService {
                 scan_status,
                 stack_key: stack_key.as_deref(),
                 part_index,
+                has_subtitle,
                 now: &now,
             };
             Database::update_video(tx, &data)
@@ -627,6 +648,7 @@ impl ScannerService {
                 cover_height,
                 stack_key: stack_key.as_deref(),
                 part_index,
+                has_subtitle,
             };
             Database::insert_video(tx, &data)
                 .map_err(|e| format!("插入视频记录失败 '{}': {}", path_str, e))?;

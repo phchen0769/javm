@@ -92,18 +92,23 @@ pub fn artwork_path(dir: &Path, stem: &str, suffix: &str) -> PathBuf {
 /// 成功返回缩略图绝对路径，失败返回 None（调用方回退用原图）。
 pub fn generate_cover_thumbnail(source: &Path, dir: &Path, stem: &str) -> Option<String> {
     // 按内容猜格式（源可能是命名为 .jpg 的 webp/png），只解码一次
-    let img = match image::ImageReader::open(source)
-        .and_then(|reader| reader.with_guessed_format())
-    {
-        Ok(reader) => match reader.decode() {
-            Ok(img) => img,
-            Err(e) => {
-                log::error!("[artwork] event=thumbsm_decode_failed src={} error={}", source.display(), e);
-                return None;
-            }
-        },
+    let reader = match image::ImageReader::open(source).and_then(|reader| reader.with_guessed_format()) {
+        Ok(reader) => reader,
         Err(e) => {
             log::error!("[artwork] event=thumbsm_open_failed src={} error={}", source.display(), e);
+            return None;
+        }
+    };
+    // AVIF：image crate 默认特性只有编码器没有解码器，必定失败；直接跳过（前端回退用原图，
+    // WebView 能正常显示 AVIF），不再每次启动重复报错。
+    if matches!(reader.format(), Some(image::ImageFormat::Avif)) {
+        log::info!("[artwork] event=thumbsm_skipped_avif src={}", source.display());
+        return None;
+    }
+    let img = match reader.decode() {
+        Ok(img) => img,
+        Err(e) => {
+            log::error!("[artwork] event=thumbsm_decode_failed src={} error={}", source.display(), e);
             return None;
         }
     };
@@ -126,6 +131,8 @@ pub fn generate_cover_thumbnail(source: &Path, dir: &Path, stem: &str) -> Option
         Ok(_) => Some(dst.to_string_lossy().to_string()),
         Err(e) => {
             log::error!("[artwork] event=thumbsm_save_failed dst={} error={}", dst.display(), e);
+            // SMB 等网络盘写失败会留下 0 字节文件，清掉以免被当成有效缩略图
+            let _ = std::fs::remove_file(&dst);
             None
         }
     }

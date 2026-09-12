@@ -334,6 +334,7 @@ pub async fn resolve_video_preview_images(
 #[tauri::command]
 pub async fn download_subtitle_for_video(
     app: AppHandle,
+    db: State<'_, Database>,
     video_path: String,
     local_id: Option<String>,
 ) -> AppResult<Option<String>> {
@@ -353,6 +354,11 @@ pub async fn download_subtitle_for_video(
     let saved = crate::media::subtitle::download_subtitle(&local_id, &asset_dir, &stem)
         .await
         .map_err(AppError::Business)?;
+    // 落地成功即维护库列，列表「字幕」徽标不再实时探测文件系统
+    if saved.is_some() {
+        let conn = db.get_connection()?;
+        Database::set_video_has_subtitle(&conn, &video_path, true)?;
+    }
     Ok(saved.map(|path| path.to_string_lossy().to_string()))
 }
 

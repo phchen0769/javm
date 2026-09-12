@@ -538,21 +538,28 @@ async fn perform_scrape(app: &tauri::AppHandle, video_path: &str) -> Result<(), 
     use crate::resource_scrape::database_writer::DatabaseWriter;
     use crate::db::Database;
 
-    // 1. 提取番号
-    let designation = extract_designation_from_path(video_path)?;
+    // 1. 提取番号（D2Pass 系番号顺带取厂牌缩写作定向线索）
+    let info = extract_designation_from_path(video_path)?;
+    let designation = info.designation;
+    let studio_hint = info.markers.studio;
     log::info!(
-        "[auto_scrape] event=designation_extracted path={} designation={}",
+        "[auto_scrape] event=designation_extracted path={} designation={} studio={:?}",
         video_path,
-        designation
+        designation,
+        studio_hint
     );
 
     // 2. 多源抓取 + 字段级融合，产出比单源更完整的最佳元数据（无选择列表 → 自动融合）
     let scrape_cancel = tokio_util::sync::CancellationToken::new();
-    let search_result =
-        crate::resource_scrape::commands::scrape_and_fuse(app, &designation, &scrape_cancel)
-            .await?
-            .result
-            .ok_or_else(|| format!("未找到该番号的信息: {}", designation))?;
+    let search_result = crate::resource_scrape::commands::scrape_and_fuse(
+        app,
+        &designation,
+        studio_hint.as_deref(),
+        &scrape_cancel,
+    )
+    .await?
+    .result
+    .ok_or_else(|| format!("未找到该番号的信息: {}", designation))?;
 
     log::info!(
         "[auto_scrape] event=fused_succeeded path={} title={}",
@@ -583,6 +590,7 @@ async fn perform_scrape(app: &tauri::AppHandle, video_path: &str) -> Result<(), 
             video_id,
             metadata,
             outcome.artwork,
+            outcome.subtitle_saved,
         )
         .await?;
 
@@ -661,8 +669,10 @@ fn get_or_create_video_id(db: &crate::db::Database, video_path: &str) -> Result<
     Ok(video_id)
 }
 
-/// 从视频文件路径中提取番号
-fn extract_designation_from_path(video_path: &str) -> Result<String, String> {
+/// 从视频文件路径中提取番号及语义标记
+fn extract_designation_from_path(
+    video_path: &str,
+) -> Result<crate::utils::designation_recognizer::DesignationInfo, String> {
     use std::path::Path;
     use crate::utils::designation_recognizer::DesignationRecognizer;
 
@@ -674,7 +684,7 @@ fn extract_designation_from_path(video_path: &str) -> Result<String, String> {
 
     let recognizer = DesignationRecognizer::new();
     recognizer
-        .recognize_with_regex(filename)
+        .recognize_detailed(filename)
         .ok_or_else(|| format!("无法从文件名提取番号: {}", filename))
 }
 

@@ -73,6 +73,8 @@ pub struct VideoUpdateData<'a> {
     pub scan_status: i32,
     pub stack_key: Option<&'a str>,
     pub part_index: Option<i64>,
+    /// 是否存在匹配的字幕文件（扫描时按同级目录探测）
+    pub has_subtitle: bool,
     pub now: &'a str,
 }
 
@@ -105,6 +107,8 @@ pub struct VideoInsertData<'a> {
     pub cover_height: Option<i32>,
     pub stack_key: Option<&'a str>,
     pub part_index: Option<i64>,
+    /// 是否存在匹配的字幕文件（扫描时按同级目录探测）
+    pub has_subtitle: bool,
 }
 
 pub struct ExistingVideoScanInfo {
@@ -134,6 +138,8 @@ pub struct ExistingVideoScanInfo {
     /// 已记录的分段归并键与段序号，用于扫描时自愈历史分段误判（规则更新后重新归并）
     pub stack_key: Option<String>,
     pub part_index: Option<i64>,
+    /// 已记录的字幕标记；None = 旧库尚未探测
+    pub has_subtitle: Option<bool>,
 }
 
 pub struct VideoScrapeUpdateData<'a> {
@@ -152,6 +158,8 @@ pub struct VideoScrapeUpdateData<'a> {
     pub cover_height: Option<i32>,
     /// 是否无码作品（有码无码分轨）
     pub is_uncensored: bool,
+    /// 本次刮削是否落地了字幕文件；为真时置 has_subtitle=1，否则保持原值
+    pub subtitle_saved: bool,
 }
 
 /// 合法的元数据表名枚举，防止 SQL 注入

@@ -538,8 +538,9 @@ const handleScrape = async () => {
     scrapeDiagnostics.value = []
 
     try {
-        // 详情刮削没有选择列表：并发查询所有已启用数据源并按字段融合出最佳结果
-        const { result: best, diagnostics } = await scrapeStore.scrapeFused(localId)
+        // 详情刮削没有选择列表：并发查询所有已启用数据源并按字段融合出最佳结果；
+        // 附原文件路径，D2Pass 系番号（加勒比/一本道等）可从文件名取厂牌缩写定向刮削源
+        const { result: best, diagnostics } = await scrapeStore.scrapeFused(localId, currentVideoPath.value || undefined)
         // 各源诊断（成功并附网址/失败/超时/无数据）供展示，便于关闭无效源；无结果时同样展示以说明原因
         scrapeDiagnostics.value = diagnostics
 

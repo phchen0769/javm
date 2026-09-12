@@ -273,13 +273,16 @@ impl TaskQueueManager {
             .map_err(|e| e.to_string())?;
         self.emit_progress(task_id, 0).await;
 
-        // 步骤 1: 从文件名提取番号（进度 1）
-        let designation = self.extract_designation(&task.path)?;
+        // 步骤 1: 从文件名提取番号（进度 1）；D2Pass 系番号顺带取厂牌缩写作定向线索
+        let info = self.extract_designation(&task.path)?;
+        let designation = info.designation;
+        let studio_hint = info.markers.studio;
         log::info!(
-            "[scrape_queue] event=designation_extracted task_id={} path={} designation={}",
+            "[scrape_queue] event=designation_extracted task_id={} path={} designation={} studio={:?}",
             task_id,
             task.path,
-            designation
+            designation,
+            studio_hint
         );
         self.db
             .update_scrape_task_progress(task_id, 1)
@@ -292,8 +295,13 @@ impl TaskQueueManager {
 
         // 步骤 2: 多源抓取 + 字段级融合，产出比单源更完整的最佳元数据（无选择列表 → 自动融合）
         let scrape_cancel = tokio_util::sync::CancellationToken::new();
-        let fusion =
-            super::commands::scrape_and_fuse(&self.app, &designation, &scrape_cancel).await?;
+        let fusion = super::commands::scrape_and_fuse(
+            &self.app,
+            &designation,
+            studio_hint.as_deref(),
+            &scrape_cancel,
+        )
+        .await?;
         // 记录各源诊断到全局状态，供批量页逐任务展开查看（无结果也记，便于看出全员失败/超时）
         if let Some(state) = self.app.try_state::<super::commands::RsTaskQueueState>() {
             state
@@ -366,6 +374,7 @@ impl TaskQueueManager {
                 video_id.clone(),
                 metadata,
                 outcome.artwork,
+                outcome.subtitle_saved,
             )
             .await
         {
@@ -426,15 +435,18 @@ impl TaskQueueManager {
         }
     }
 
-    /// 从视频文件名中提取番号（使用 DesignationRecognizer 统一逻辑）
-    fn extract_designation(&self, video_path: &str) -> Result<String, String> {
+    /// 从视频文件名中提取番号及语义标记（使用 DesignationRecognizer 统一逻辑）
+    fn extract_designation(
+        &self,
+        video_path: &str,
+    ) -> Result<crate::utils::designation_recognizer::DesignationInfo, String> {
         use std::path::Path;
 
         let path = Path::new(video_path);
         let filename = path.file_stem().ok_or("无效的文件名")?.to_string_lossy();
 
         let recognizer = crate::utils::designation_recognizer::DesignationRecognizer::new();
-        recognizer.recognize_with_regex(&filename).ok_or_else(|| {
+        recognizer.recognize_detailed(&filename).ok_or_else(|| {
             format!(
                 "无法从文件名中提取番号: {}。文件名应包含类似 ABC-123 格式的番号",
                 filename
