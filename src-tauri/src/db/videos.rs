@@ -102,6 +102,15 @@ impl Database {
         Ok(())
     }
 
+    /// 更新文件创建时间（扫描发现旧库缺失时补写，列表按此排序、不再实时 stat）
+    pub fn set_video_file_ctime(conn: &Connection, video_path: &str, file_ctime: Option<i64>) -> Result<()> {
+        conn.execute(
+            "UPDATE videos SET file_ctime = ? WHERE video_path = ?",
+            params![file_ctime, video_path],
+        )?;
+        Ok(())
+    }
+
     pub fn update_video_file_location(
         conn: &Connection,
         video_id: &str,
@@ -202,7 +211,7 @@ impl Database {
                 video_path, id, title, original_title, studio, premiered, director,
                 local_id, rating, file_size, fast_hash, duration, resolution,
                 file_mtime, nfo_mtime, poster_mtime, thumb_mtime, fanart_mtime,
-                poster, thumb, fanart, scan_status, stack_key, part_index, has_subtitle
+                poster, thumb, fanart, scan_status, stack_key, part_index, has_subtitle, file_ctime
             FROM videos
             WHERE dir_path LIKE ? || '%'"
         )?;
@@ -234,6 +243,7 @@ impl Database {
                     stack_key: row.get(22)?,
                     part_index: row.get(23)?,
                     has_subtitle: row.get::<_, Option<i64>>(24)?.map(|v| v != 0),
+                    file_ctime: row.get(25)?,
                 },
             ))
         })?;
@@ -325,7 +335,8 @@ impl Database {
                 scan_status = ?22,
                 stack_key = ?23,
                 part_index = ?24,
-                has_subtitle = ?25
+                has_subtitle = ?25,
+                file_ctime = ?26
             WHERE video_path = ?1",
             params![
                 data.path_str,
@@ -352,7 +363,8 @@ impl Database {
                 data.scan_status,
                 data.stack_key,
                 data.part_index,
-                data.has_subtitle
+                data.has_subtitle,
+                data.file_ctime
             ],
         )?;
         Ok(())
@@ -366,8 +378,8 @@ impl Database {
                 file_size, fast_hash, created_at, updated_at, scan_status,
                 duration, resolution, rating, poster, thumb, fanart,
                 file_mtime, nfo_mtime, poster_mtime, thumb_mtime, fanart_mtime,
-                cover_width, cover_height, stack_key, part_index, has_subtitle
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
+                cover_width, cover_height, stack_key, part_index, has_subtitle, file_ctime
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)",
             params![
                 data.id,
                 data.local_id,
@@ -397,7 +409,8 @@ impl Database {
                 data.cover_height,
                 data.stack_key,
                 data.part_index,
-                data.has_subtitle
+                data.has_subtitle,
+                data.file_ctime
             ],
         )?;
         Ok(())

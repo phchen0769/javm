@@ -52,8 +52,8 @@ export interface Video {
     tags?: string // 标签列表(逗号分隔) (关联查询)
     genres?: string // 题材列表(逗号分隔) (关联查询)
     createdAt: string // 创建时间 (videos.created_at)
-    fileCreatedAt?: string // 文件创建时间（回退到文件修改时间）
-    fileModifiedAt?: string // 文件修改时间
+    fileCreatedAt?: string // 文件创建时间（回退到文件修改时间；videos.file_ctime，扫描时维护）
+    fileModifiedAt?: string // 文件修改时间（videos.file_mtime）
     updatedAt: string // 更新时间 (videos.updated_at)
     scrapedAt?: string // 刮削时间 (videos.scraped_at)
     parts?: VideoPart[] // 分段列表（多分段影片折叠后由后端注入，按段序号排序）

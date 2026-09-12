@@ -8,7 +8,7 @@ use crate::utils::designation_recognizer::stack_scope_dir;
 
 use super::service::{
     clear_video_scrape_data, copy_dir_recursive, delete_video_and_files,
-    enrich_videos_with_file_times, ensure_video_in_own_dir_with_db, move_file,
+    ensure_video_in_own_dir_with_db, move_file,
     update_all_directories_count, AdVideo, VideoUpdateContext, VideoUpdatePayload,
     VideoUpdateResult, build_nfo_metadata_for_update, load_video_relation_names,
     parse_name_list,
@@ -195,7 +195,7 @@ pub async fn get_videos(
 ) -> AppResult<Vec<serde_json::Value>> {
     let conn = db.get_connection()?;
 
-    let videos = tokio::task::spawn_blocking(move || -> AppResult<Vec<serde_json::Value>> {
+    tokio::task::spawn_blocking(move || -> AppResult<Vec<serde_json::Value>> {
         let sql = r#"
             SELECT
                 v.id,
@@ -241,11 +241,12 @@ pub async fn get_videos(
                 v.cover_thumb,
                 v.stack_key,
                 v.part_index,
-                v.has_subtitle
+                v.has_subtitle,
+                v.file_ctime,
+                v.file_mtime
             FROM videos v
         "#;
-        // 注意：不在 SQL 里排序，最终顺序由 enrich_videos_with_file_times 按文件
-        // 创建时间重排覆盖，此处排序属浪费。
+        // 注意：不在 SQL 里排序，最终顺序在下方按 file_ctime（库列）倒序重排。
 
         let mut stmt = conn.prepare(sql)?;
 
@@ -254,6 +255,8 @@ pub async fn get_videos(
                 let poster: Option<String> = row.get(11)?;
                 let thumb: Option<String> = row.get(12)?;
                 let cover_thumb: Option<String> = row.get(24)?;
+                let file_ctime: Option<i64> = row.get(28)?;
+                let file_mtime: Option<i64> = row.get(29)?;
 
                 Ok(serde_json::json!({
                     "id": row.get::<_, String>(0)?,
@@ -270,7 +273,7 @@ pub async fn get_videos(
                     "scanStatus": row.get::<_, i32>(8)?,
                     "director": row.get::<_, Option<String>>(9)?,
                     "localId": row.get::<_, Option<String>>(10)?,
-                    // 原始 poster，封面存在性解析挪到 enrich 并发阶段，避免在此串行 exists()
+                    // 图集路径直接来自库列：扫描时已按存在性过滤并维护，列表不再逐张 exists()
                     "poster": poster,
                     "thumb": thumb,
                     "fanart": row.get::<_, Option<String>>(13)?,
@@ -284,13 +287,17 @@ pub async fn get_videos(
                     "coverWidth": row.get::<_, Option<i64>>(21)?,
                     "coverHeight": row.get::<_, Option<i64>>(22)?,
                     "isUncensored": row.get::<_, Option<i64>>(23)?.unwrap_or(0) != 0,
-                    // 原始缩略图路径，存在性解析同样挪到 enrich 并发阶段
                     "coverThumb": cover_thumb,
                     // 分段归并键（去后缀基名）与段序号，仅用于下方 (dirPath, stackKey) 折叠
                     "stackKey": row.get::<_, Option<String>>(25)?,
                     "partIndex": row.get::<_, Option<i64>>(26)?,
                     // 字幕标记来自库列（扫描/字幕下载时维护），列表不再实时探测文件系统
                     "hasSubtitle": row.get::<_, Option<i64>>(27)?.unwrap_or(0) != 0,
+                    // 文件时间来自库列（扫描时写入；旧库由 backfill_file_ctimes 一次性补齐），
+                    // 之前每次加载都逐视频 stat，SMB/USB 库上实测十余秒
+                    "fileCreatedAt": file_ctime.and_then(millis_to_rfc3339),
+                    "fileModifiedAt": file_mtime.and_then(millis_to_rfc3339),
+                    "fileCtimeMillis": file_ctime,
                 }))
             })?;
 
@@ -311,39 +318,36 @@ pub async fn get_videos(
                 .unwrap_or(false)
         });
 
+        // 按文件创建时间倒序（缺失者排最后），与之前的实时探测排序口径一致
+        videos.sort_by(|left, right| {
+            let key = |v: &serde_json::Value| v.get("fileCtimeMillis").and_then(|x| x.as_i64());
+            match (key(left), key(right)) {
+                (Some(l), Some(r)) => r.cmp(&l),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+        });
+        for video in videos.iter_mut() {
+            if let Some(obj) = video.as_object_mut() {
+                obj.remove("fileCtimeMillis");
+            }
+        }
+
+        // 分段折叠：同 (dirPath, stackKey) 且组员 ≥2 的文件合并为一张代表卡，
+        // 代表取段序号最小者，附 parts 列表与 partCount，duration 汇总为总时长；
+        // 其余段从列表移除。单文件或 stackKey 为空者原样保留。
+        fold_video_stacks(&mut videos);
+
         Ok(videos)
     })
     .await
-    .map_err(|e| AppError::TaskJoin(e.to_string()))??;
+    .map_err(|e| AppError::TaskJoin(e.to_string()))?
+}
 
-    // 并发阶段：文件时间 + 封面存在性；视频文件已不存在的记录一并识别出来
-    //（之前是在 SQL 循环后串行 exists() 一遍，SMB/USB 库上白白多跑一轮文件系统探测）。
-    let (mut videos, stale_paths) = enrich_videos_with_file_times(videos).await;
-
-    if !stale_paths.is_empty() {
-        let conn = db.get_connection()?;
-        tokio::task::spawn_blocking(move || -> AppResult<()> {
-            for chunk in stale_paths.chunks(500) {
-                let placeholders = std::iter::repeat_n("?", chunk.len()).collect::<Vec<_>>().join(", ");
-                let sql = format!("DELETE FROM videos WHERE video_path IN ({})", placeholders);
-                let params = chunk
-                    .iter()
-                    .map(|path| path as &dyn rusqlite::types::ToSql)
-                    .collect::<Vec<_>>();
-                conn.execute(&sql, params.as_slice())?;
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|e| AppError::TaskJoin(e.to_string()))??;
-    }
-
-    // 分段折叠：同 (dirPath, stackKey) 且组员 ≥2 的文件合并为一张代表卡，
-    // 代表取段序号最小者，附 parts 列表与 partCount，duration 汇总为总时长；
-    // 其余段从列表移除。单文件或 stackKey 为空者原样保留。
-    fold_video_stacks(&mut videos);
-
-    Ok(videos)
+/// 毫秒时间戳 → RFC3339（前端筛选/排序沿用字符串时间）
+fn millis_to_rfc3339(millis: i64) -> Option<String> {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(millis).map(|dt| dt.to_rfc3339())
 }
 
 /// 获取演员列表（含头像与本地作品数），供「发现」页演员分面显示头像。
@@ -567,6 +571,71 @@ pub async fn backfill_subtitle_flags(
         }
         tx.commit()?;
         Ok(updated)
+    })
+    .await
+    .map_err(|e| AppError::TaskJoin(e.to_string()))?
+}
+
+/// 一次性回填旧库的文件创建时间列：只处理 `file_ctime IS NULL` 的记录，并发 stat 后写库。
+/// 之后由扫描维护，列表按库列排序、不再实时探测。返回本次回填的记录数。
+#[tauri::command]
+pub async fn backfill_file_ctimes(db: State<'_, crate::db::Database>) -> AppResult<u32> {
+    let conn = db.get_connection()?;
+    let targets: Vec<String> = tokio::task::spawn_blocking(move || -> AppResult<Vec<String>> {
+        let mut stmt = conn.prepare("SELECT video_path FROM videos WHERE file_ctime IS NULL")?;
+        let iter = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut list = Vec::new();
+        for item in iter {
+            list.push(item?);
+        }
+        Ok(list)
+    })
+    .await
+    .map_err(|e| AppError::TaskJoin(e.to_string()))??;
+    if targets.is_empty() {
+        return Ok(0);
+    }
+
+    // 文件系统探测是延迟型负载（网络盘/USB 盘尤甚），并发度按核数放大：实测并发 16 与 64 相差约 3 倍
+    let max_concurrency = std::thread::available_parallelism()
+        .map(|p| p.get() * 4)
+        .unwrap_or(16)
+        .clamp(8, 64);
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrency));
+    let mut tasks = tokio::task::JoinSet::new();
+    for video_path in targets {
+        let semaphore = std::sync::Arc::clone(&semaphore);
+        tasks.spawn(async move {
+            let _permit = semaphore.acquire_owned().await.ok();
+            tokio::task::spawn_blocking(move || {
+                let ctime = std::fs::metadata(&video_path).ok().and_then(|m| {
+                    let t = m.created().ok().or_else(|| m.modified().ok())?;
+                    i64::try_from(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis()).ok()
+                });
+                (video_path, ctime)
+            })
+            .await
+            .ok()
+        });
+    }
+    let mut results: Vec<(String, i64)> = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        if let Ok(Some((path, Some(ctime)))) = joined {
+            results.push((path, ctime));
+        }
+    }
+    if results.is_empty() {
+        return Ok(0);
+    }
+
+    let conn = db.get_connection()?;
+    tokio::task::spawn_blocking(move || -> AppResult<u32> {
+        let tx = conn.unchecked_transaction()?;
+        for (path, ctime) in &results {
+            crate::db::Database::set_video_file_ctime(&tx, path, Some(*ctime))?;
+        }
+        tx.commit()?;
+        Ok(results.len() as u32)
     })
     .await
     .map_err(|e| AppError::TaskJoin(e.to_string()))?

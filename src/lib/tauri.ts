@@ -74,6 +74,11 @@ export async function backfillSubtitleFlags(): Promise<number> {
     return tauriInvoke<number>('backfill_subtitle_flags')
 }
 
+/** 一次性回填旧库的文件创建时间（仅处理尚未记录的视频；列表排序不再实时 stat），返回回填数量 */
+export async function backfillFileCtimes(): Promise<number> {
+    return tauriInvoke<number>('backfill_file_ctimes')
+}
+
 /** 鑾峰彇鍗曚釜瑙嗛璇︽儏 */
 export async function getVideo(id: string): Promise<Video> {
     return tauriInvoke<Video>('get_video', { id })

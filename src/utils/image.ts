@@ -46,13 +46,32 @@ export function resolveCoverImage(
   coverType?: string,
   preferThumbnail = false,
 ): string | undefined {
-  if (coverType === 'portrait') {
-    return video.poster || video.fanart || video.thumb || undefined
+  return resolveCoverCandidates(video, coverType, preferThumbnail)[0]
+}
+
+/**
+ * 按封面方向偏好给出全部候选图（去重、去空），顺序与 `resolveCoverImage` 一致。
+ *
+ * 列表不再在后端逐张探测封面是否存在（SMB/USB 库上是秒级开销），改为前端加载失败时
+ * 顺着候选顺序回退到下一张，效果与之前「后端过滤掉不存在的图」等价。
+ */
+export function resolveCoverCandidates(
+  video: CoverImageFields,
+  coverType?: string,
+  preferThumbnail = false,
+): string[] {
+  const ordered =
+    coverType === 'portrait'
+      ? [video.poster, video.fanart, video.thumb]
+      : [preferThumbnail ? video.coverThumb : undefined, video.fanart, video.thumb, video.poster]
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const path of ordered) {
+    if (!path || seen.has(path)) continue
+    seen.add(path)
+    result.push(path)
   }
-  if (preferThumbnail && video.coverThumb) {
-    return video.coverThumb
-  }
-  return video.fanart || video.thumb || video.poster || undefined
+  return result
 }
 
 /** 是否存在任意封面图（poster / thumb / fanart） */

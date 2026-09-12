@@ -28,18 +28,21 @@ fn upsert_downloaded_video_record(conn: &rusqlite::Connection, video_path: &std:
         .parent()
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_default();
-    let file_size = video_path
-        .metadata()
-        .map(|metadata| metadata.len() as i64)
-        .unwrap_or(0);
+    let file_metadata = video_path.metadata().ok();
+    let file_size = file_metadata.as_ref().map(|metadata| metadata.len() as i64).unwrap_or(0);
+    // 文件创建时间（取不到回退修改时间），列表按此排序、不再实时 stat
+    let file_ctime = file_metadata.as_ref().and_then(|m| {
+        let t = m.created().ok().or_else(|| m.modified().ok())?;
+        i64::try_from(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis()).ok()
+    });
     let now = chrono::Utc::now().to_rfc3339();
     let video_id = Uuid::new_v4().to_string();
 
     conn.execute(
         "INSERT INTO videos (
             id, local_id, title, original_title, video_path, dir_path,
-            file_size, scan_status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            file_size, scan_status, created_at, updated_at, file_ctime
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rusqlite::params![
             video_id,
             file_stem,
@@ -51,6 +54,7 @@ fn upsert_downloaded_video_record(conn: &rusqlite::Connection, video_path: &std:
             1,
             now,
             now,
+            file_ctime,
         ],
     )
     .map_err(|e| format!("插入下载视频记录失败: {}", e))?;

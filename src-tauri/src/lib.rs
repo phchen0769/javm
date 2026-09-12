@@ -352,6 +352,7 @@ pub fn run() {
             video::commands::backfill_cover_dimensions,
             video::commands::backfill_cover_thumbnails,
             video::commands::backfill_subtitle_flags,
+            video::commands::backfill_file_ctimes,
             video::commands::get_duplicate_videos,
             video::commands::delete_video_db,
             video::commands::delete_video_file,

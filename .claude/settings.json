@@ -133,7 +133,8 @@
       "Bash(diskutil info *)",
       "Read(//Volumes/Films/3T/06/ABP-485/**)",
       "Bash(sqlite3 /tmp/javm.db \"select substr\\(cover_thumb,1,15\\), count\\(*\\) from videos where cover_thumb is not null and cover_thumb!='' group by 1;\")",
-      "Bash(python3 -c 'import json; d=json.load\\(open\\('\\\\''/Users/fedorov/Library/Application Support/com.ddmoyu.javm/settings.json'\\\\''\\)\\); print\\(json.dumps\\(d.get\\('\\\\''metadata'\\\\''\\), ensure_ascii=False\\)\\)')"
+      "Bash(python3 -c 'import json; d=json.load\\(open\\('\\\\''/Users/fedorov/Library/Application Support/com.ddmoyu.javm/settings.json'\\\\''\\)\\); print\\(json.dumps\\(d.get\\('\\\\''metadata'\\\\''\\), ensure_ascii=False\\)\\)')",
+      "Bash(sqlite3 /tmp/javm-probe.db \"select count\\(*\\), sum\\(file_mtime is null\\), sum\\(scan_status=2\\) from videos;\")"
     ],
     "deny": [
       "Bash(git reset --hard *)",

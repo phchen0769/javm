@@ -252,6 +252,7 @@ impl Database {
                 has_subtitle INTEGER,
                 cover_dims_attempted_at TEXT,
                 cover_thumb_attempted_at TEXT,
+                file_ctime INTEGER,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 scraped_at TEXT
@@ -275,6 +276,9 @@ impl Database {
         // 兼容旧库：补封面尺寸/缩略图回填的最近尝试时间，失败项不再每次启动重试（7 天后才再试）。
         let _ = conn.execute("ALTER TABLE videos ADD COLUMN cover_dims_attempted_at TEXT", []);
         let _ = conn.execute("ALTER TABLE videos ADD COLUMN cover_thumb_attempted_at TEXT", []);
+        // 兼容旧库：补文件创建时间列（毫秒；扫描时写入，NULL=尚未探测，由一次性回填补齐）。
+        // 之前列表每次加载都对每个视频 stat 取创建时间排序，在 SMB/USB 库上实测十余秒。
+        let _ = conn.execute("ALTER TABLE videos ADD COLUMN file_ctime INTEGER", []);
         log::info!("[db] event=create_videos_table_succeeded");
 
         // 3. 关联表

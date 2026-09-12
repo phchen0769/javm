@@ -7,7 +7,7 @@ import { SCAN_STATUS_TEXT, SCAN_STATUS_VARIANT } from '@/utils/constants'
 import { formatDuration, formatRating } from '@/utils/format'
 import { useVideoStore } from '@/stores'
 import { useSettingsStore } from '@/stores/settings'
-import { toImageSrc, resolveCoverImage, hasCoverImage, galleryCoverRatio } from '@/utils/image'
+import { toImageSrc, resolveCoverCandidates, hasCoverImage, galleryCoverRatio } from '@/utils/image'
 import { COVER_LAYOUTS, WATERFALL_NO_COVER_WIDTH } from '@/utils/constants'
 import {
   openInExplorer,
@@ -44,7 +44,8 @@ const emit = defineEmits<{
 
 const videoStore = useVideoStore()
 const settingsStore = useSettingsStore()
-const imgError = ref(false)
+// 加载失败的封面路径：后端不再探测封面是否存在，失败时顺着候选顺序回退到下一张
+const failedCoverPaths = ref<string[]>([])
 const showDeleteDialog = ref(false)
 
 // 封面布局（横屏/竖屏）随设置变化
@@ -92,14 +93,18 @@ const coverStateKey = computed(() => [
 ].join('|'))
 
 watch(coverStateKey, () => {
-  imgError.value = false
+  failedCoverPaths.value = []
 }, { immediate: true })
 
-// 图片源（网格优先用小缩略图降低解码开销；按封面方向偏好选图：横屏→fanart，竖屏→poster，带回退）
+// 当前展示的封面路径（网格优先用小缩略图降低解码开销；按封面方向偏好选图：横屏→fanart，竖屏→poster，
+// 带回退；已加载失败的路径跳过）
+const currentCoverPath = computed(() => {
+  const candidates = resolveCoverCandidates(props.video, settingsStore.settings.general.coverType, true)
+  return candidates.find(path => !failedCoverPaths.value.includes(path))
+})
+
 const imageSrc = computed(() => {
-  if (imgError.value) return null
-  const path = resolveCoverImage(props.video, settingsStore.settings.general.coverType, true)
-  const src = toImageSrc(path)
+  const src = toImageSrc(currentCoverPath.value)
   if (!src) return null
   const version = videoStore.coverVersions[props.video.id]
   return version ? `${src}${src.includes('?') ? '&' : '?'}t=${version}` : src
@@ -173,7 +178,10 @@ const handleMove = async (dir: Directory) => {
 }
 
 const onImgError = () => {
-  imgError.value = true
+  const failed = currentCoverPath.value
+  if (failed && !failedCoverPaths.value.includes(failed)) {
+    failedCoverPaths.value = [...failedCoverPaths.value, failed]
+  }
 }
 </script>
 

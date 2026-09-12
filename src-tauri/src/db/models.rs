@@ -66,6 +66,8 @@ pub struct VideoUpdateData<'a> {
     pub thumb: Option<String>,
     pub fanart: Option<String>,
     pub file_mtime: Option<i64>,
+    /// 文件创建时间（毫秒，取不到时回退修改时间），供列表按文件时间排序而不再实时 stat
+    pub file_ctime: Option<i64>,
     pub nfo_mtime: Option<i64>,
     pub poster_mtime: Option<i64>,
     pub thumb_mtime: Option<i64>,
@@ -99,6 +101,8 @@ pub struct VideoInsertData<'a> {
     pub thumb: Option<String>,
     pub fanart: Option<String>,
     pub file_mtime: Option<i64>,
+    /// 文件创建时间（毫秒，取不到时回退修改时间）
+    pub file_ctime: Option<i64>,
     pub nfo_mtime: Option<i64>,
     pub poster_mtime: Option<i64>,
     pub thumb_mtime: Option<i64>,
@@ -140,6 +144,8 @@ pub struct ExistingVideoScanInfo {
     pub part_index: Option<i64>,
     /// 已记录的字幕标记；None = 旧库尚未探测
     pub has_subtitle: Option<bool>,
+    /// 已记录的文件创建时间；None = 旧库尚未写入，扫描时补写
+    pub file_ctime: Option<i64>,
 }
 
 pub struct VideoScrapeUpdateData<'a> {

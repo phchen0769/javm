@@ -35,7 +35,7 @@ import VirtualGrid from '@/components/VirtualGrid.vue'
 import VideoDetailDialog from '@/components/VideoDetailDialog.vue'
 import ScrapeDialog from '@/components/ScrapeDialog.vue'
 import type { Video, ViewMode, CoverType } from '@/types'
-import { backfillCoverDimensions, backfillCoverThumbnails, backfillSubtitleFlags } from '@/lib/tauri'
+import { backfillCoverDimensions, backfillCoverThumbnails, backfillSubtitleFlags, backfillFileCtimes } from '@/lib/tauri'
 
 const ALL_DIRECTORY_VALUE = '__all__'
 
@@ -198,6 +198,15 @@ const clearSearch = () => {
 onMounted(async () => {
   await videoStore.fetchVideos()
   videoStore.fetchDirectories()
+  // 旧库一次性回填文件创建时间（列表排序不再实时 stat），有补写则刷新列表恢复时间顺序
+  try {
+    const updated = await backfillFileCtimes()
+    if (updated > 0) {
+      await videoStore.fetchVideos()
+    }
+  } catch (e) {
+    console.error('回填文件创建时间失败:', e)
+  }
   // 旧库一次性回填字幕标记（列表不再实时探测文件系统），有补写则刷新列表显示徽标
   try {
     const updated = await backfillSubtitleFlags()

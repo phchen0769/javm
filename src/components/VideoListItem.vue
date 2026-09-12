@@ -7,7 +7,7 @@ import { SCAN_STATUS_TEXT, SCAN_STATUS_VARIANT } from '@/utils/constants'
 import { formatDuration, formatRating, formatFileSize } from '@/utils/format'
 import { useVideoStore } from '@/stores'
 import { useSettingsStore } from '@/stores/settings'
-import { toImageSrc, resolveCoverImage } from '@/utils/image'
+import { toImageSrc, resolveCoverCandidates } from '@/utils/image'
 import {
   openInExplorer,
   moveVideoFile,
@@ -38,7 +38,8 @@ const emit = defineEmits<{
 
 const videoStore = useVideoStore()
 const settingsStore = useSettingsStore()
-const imgError = ref(false)
+// 加载失败的封面路径：后端不再探测封面是否存在，失败时顺着候选顺序回退到下一张
+const failedCoverPaths = ref<string[]>([])
 const showDeleteDialog = ref(false)
 
 const coverStateKey = computed(() => [
@@ -51,14 +52,17 @@ const coverStateKey = computed(() => [
 ].join('|'))
 
 watch(coverStateKey, () => {
-  imgError.value = false
+  failedCoverPaths.value = []
 }, { immediate: true })
 
-// 图片源（按封面方向偏好选图：横屏→fanart，竖屏→poster，带回退）
+// 当前展示的封面路径（按封面方向偏好选图：横屏→fanart，竖屏→poster，带回退；已加载失败的路径跳过）
+const currentCoverPath = computed(() => {
+  const candidates = resolveCoverCandidates(props.video, settingsStore.settings.general.coverType)
+  return candidates.find(path => !failedCoverPaths.value.includes(path))
+})
+
 const imageSrc = computed(() => {
-  if (imgError.value) return null
-  const path = resolveCoverImage(props.video, settingsStore.settings.general.coverType)
-  const src = toImageSrc(path)
+  const src = toImageSrc(currentCoverPath.value)
   if (!src) return null
   const version = videoStore.coverVersions[props.video.id]
   return version ? `${src}${src.includes('?') ? '&' : '?'}t=${version}` : src
@@ -88,7 +92,12 @@ const handleMove = async (dir: Directory) => {
   }
 }
 
-const onImgError = () => { imgError.value = true }
+const onImgError = () => {
+  const failed = currentCoverPath.value
+  if (failed && !failedCoverPaths.value.includes(failed)) {
+    failedCoverPaths.value = [...failedCoverPaths.value, failed]
+  }
+}
 </script>
 
 <template>

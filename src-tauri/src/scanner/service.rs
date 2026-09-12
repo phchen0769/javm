@@ -361,6 +361,10 @@ impl ScannerService {
             .map_err(|e| format!("获取文件元数据失败 '{}': {}", path_str, e))?;
         let file_size = file_metadata.len();
         let file_mtime = system_time_to_millis(file_metadata.modified().ok());
+        // 文件创建时间（取不到回退修改时间）：持久化供列表排序，列表加载不再逐视频 stat
+        let file_ctime = system_time_to_millis(
+            file_metadata.created().ok().or_else(|| file_metadata.modified().ok()),
+        );
 
         // 跳过空文件
         if file_size == 0 {
@@ -435,6 +439,11 @@ impl ScannerService {
                 if existing_info.has_subtitle != Some(has_subtitle) {
                     Database::set_video_has_subtitle(tx, &path_str, has_subtitle)
                         .map_err(|e| format!("更新字幕标记失败 '{}': {}", path_str, e))?;
+                }
+                // 文件创建时间：旧库未记录时补写（内容未变则创建时间不变，无需每次覆盖）
+                if existing_info.file_ctime.is_none() && file_ctime.is_some() {
+                    Database::set_video_file_ctime(tx, &path_str, file_ctime)
+                        .map_err(|e| format!("更新文件创建时间失败 '{}': {}", path_str, e))?;
                 }
                 // 自愈历史误判：旧规则仅认 poster，「NFO + 仅横版封面」被标为未刮削(1)。
                 // 内容未变时若同级已具备 NFO+任一封面，将 1 升级为已完成(2)，只升不降、不动失败态(3/4)。
@@ -600,6 +609,7 @@ impl ScannerService {
                 thumb: preserved_thumb.clone(),
                 fanart: preserved_fanart.clone(),
                 file_mtime,
+                file_ctime,
                 nfo_mtime,
                 poster_mtime,
                 thumb_mtime,
@@ -640,6 +650,7 @@ impl ScannerService {
                 thumb,
                 fanart,
                 file_mtime,
+                file_ctime,
                 nfo_mtime,
                 poster_mtime,
                 thumb_mtime,

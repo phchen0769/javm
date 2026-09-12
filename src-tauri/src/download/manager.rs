@@ -641,17 +641,23 @@ fn get_or_create_video_id(db: &crate::db::Database, video_path: &str) -> Result<
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
     
-    let file_size = path.metadata().map(|m| m.len()).unwrap_or(0);
+    let file_metadata = path.metadata().ok();
+    let file_size = file_metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+    // 文件创建时间（取不到回退修改时间），列表按此排序、不再实时 stat
+    let file_ctime = file_metadata.as_ref().and_then(|m| {
+        let t = m.created().ok().or_else(|| m.modified().ok())?;
+        i64::try_from(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis()).ok()
+    });
     let fast_hash = calculate_fast_hash(path)?;
     let now = Utc::now().to_rfc3339();
     let video_id = uuid::Uuid::new_v4().to_string();
-    
+
     // 插入基本视频记录
     conn.execute(
         "INSERT INTO videos (
-            id, video_path, dir_path, title, original_title, 
-            file_size, fast_hash, scan_status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            id, video_path, dir_path, title, original_title,
+            file_size, fast_hash, scan_status, created_at, updated_at, file_ctime
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rusqlite::params![
             video_id,
             video_path,
@@ -663,6 +669,7 @@ fn get_or_create_video_id(db: &crate::db::Database, video_path: &str) -> Result<
             1,  // scan_status = 1 (未刮削)
             now,
             now,
+            file_ctime,
         ],
     ).map_err(|e| format!("插入视频记录失败: {}", e))?;
     
