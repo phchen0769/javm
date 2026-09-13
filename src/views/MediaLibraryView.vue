@@ -3,6 +3,7 @@ import { ref, onMounted, onActivated, computed, watch } from 'vue'
 import { useDebounceFn } from '@vueuse/core'
 import { Search, ArrowUpDown, Filter, X, LayoutGrid, List, RefreshCw, RectangleHorizontal, RectangleVertical, LayoutDashboard, Activity } from 'lucide-vue-next'
 import { useVideoStore, useSettingsStore } from '@/stores'
+import { toast } from 'vue-sonner'
 import LibraryHealthDialog from '@/components/LibraryHealthDialog.vue'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -76,6 +77,11 @@ const toggleCoverType = () => {
 
 const refreshMediaLibrary = async () => {
   await videoStore.fetchVideos()
+  // 拉取失败（含超时）时明确提示，而不是按钮转一圈后悄无声息
+  if (videoStore.error) {
+    toast.error('刷新失败', { description: videoStore.error })
+    return
+  }
   virtualGridRef.value?.refreshLayout()
 }
 

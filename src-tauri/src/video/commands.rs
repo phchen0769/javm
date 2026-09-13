@@ -194,6 +194,7 @@ pub async fn get_videos(
     db: State<'_, crate::db::Database>,
 ) -> AppResult<Vec<serde_json::Value>> {
     let conn = db.get_connection()?;
+    let started = std::time::Instant::now();
 
     tokio::task::spawn_blocking(move || -> AppResult<Vec<serde_json::Value>> {
         let sql = r#"
@@ -341,6 +342,13 @@ pub async fn get_videos(
         // 代表取段序号最小者，附 parts 列表与 partCount，duration 汇总为总时长；
         // 其余段从列表移除。单文件或 stackKey 为空者原样保留。
         fold_video_stacks(&mut videos);
+
+        // 列表加载是媒体库刷新的唯一数据来源，记录条数与耗时便于排查「刷新没反应」
+        log::info!(
+            "[video_list] event=get_videos_completed count={} elapsed_ms={}",
+            videos.len(),
+            started.elapsed().as_millis()
+        );
 
         Ok(videos)
     })

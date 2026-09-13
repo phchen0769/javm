@@ -45,8 +45,8 @@ export async function installAppLogging(app: App<Element>) {
     try {
         const plugin = await import('@tauri-apps/plugin-log')
 
-        forwardConsole('log', plugin.trace)
-        forwardConsole('debug', plugin.debug)
+        // 只转发 info 及以上：后端日志级别为 Info，trace/debug 发过去也会被丢弃，
+        // 而每条 console.log 都是一次 IPC 往返，批量刮削时前端 store 的调试输出会造成上千次无效调用
         forwardConsole('info', plugin.info)
         forwardConsole('warn', plugin.warn)
         forwardConsole('error', plugin.error)

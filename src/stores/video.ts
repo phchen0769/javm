@@ -26,6 +26,9 @@ export const useVideoStore = defineStore('video', () => {
     // 批量刮削时每个任务完成都会请求刷新，而单次整库刷新含数千次文件系统 stat；
     // 故把刷新节流为「最多每 REFRESH_MIN_INTERVAL 跑一次」，避免刷新风暴打满 CPU。
     const REFRESH_MIN_INTERVAL = 4000
+    // 列表接口正常只需几十毫秒；超过此时长视为本次 IPC 响应丢失，放弃等待，
+    // 否则 loading 永远为 true，刷新按钮会一直处于禁用状态
+    const FETCH_VIDEOS_TIMEOUT_MS = 20000
 
     const normalizePath = (path?: string) => (path || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
 
@@ -270,9 +273,16 @@ export const useVideoStore = defineStore('video', () => {
         loading.value = true
         error.value = null
 
+        let timeoutTimer: ReturnType<typeof setTimeout> | undefined
         try {
             const previousVideos = new Map(videos.value.map(video => [video.id, video]))
-            const fetchedVideos = await getVideos()
+            const timeout = new Promise<never>((_, reject) => {
+                timeoutTimer = setTimeout(
+                    () => reject(new Error('获取视频列表超时，后端未返回响应，请重试')),
+                    FETCH_VIDEOS_TIMEOUT_MS,
+                )
+            })
+            const fetchedVideos = await Promise.race([getVideos(), timeout])
 
             for (const nextVideo of fetchedVideos) {
                 const previousVideo = previousVideos.get(nextVideo.id)
@@ -299,6 +309,7 @@ export const useVideoStore = defineStore('video', () => {
             error.value = (e as Error).message
             console.error('Failed to fetch videos:', e)
         } finally {
+            clearTimeout(timeoutTimer)
             loading.value = false
         }
     }
