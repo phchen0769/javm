@@ -243,7 +243,8 @@ pub async fn get_videos(
                 v.part_index,
                 v.has_subtitle,
                 v.file_ctime,
-                v.file_mtime
+                v.file_mtime,
+                v.scraped_at
             FROM videos v
         "#;
         // 注意：不在 SQL 里排序，最终顺序在下方按 file_ctime（库列）倒序重排。
@@ -298,6 +299,8 @@ pub async fn get_videos(
                     "fileCreatedAt": file_ctime.and_then(millis_to_rfc3339),
                     "fileModifiedAt": file_mtime.and_then(millis_to_rfc3339),
                     "fileCtimeMillis": file_ctime,
+                    // 刮削时间：重新刮削会把新封面写回原路径，前端靠它判断封面内容已变、破图片缓存
+                    "scrapedAt": row.get::<_, Option<String>>(30)?,
                 }))
             })?;
 

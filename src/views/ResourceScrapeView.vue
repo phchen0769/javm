@@ -31,6 +31,7 @@ import VideoLinkFinder from '@/components/VideoLinkFinder.vue'
 
 // Store
 import { useResourceScrapeStore } from '@/stores/resourceScrape'
+import { useVideoStore } from '@/stores/video'
 
 // Composables - 事件监听
 import {
@@ -46,6 +47,7 @@ import { type ScrapeTask, ScrapeStatus } from '@/types'
 
 // ============ Store 和事件监听 ============
 const store = useResourceScrapeStore()
+const videoStore = useVideoStore()
 const { progress: scrapeProgress } = useScrapeProgress()
 const { progress: taskProgress } = useScrapeTaskProgress()
 const { status: queueStatus } = useTaskQueueStatus()
@@ -469,7 +471,7 @@ onActivated(() => {
     </TabsContent>
   </Tabs>
 
-  <!-- 刮削对话框 -->
-  <ScrapeDialog ref="scrapeDialogRef" @success="store.fetchTasks()" />
+  <!-- 刮削对话框：保存已落库，媒体库列表（KeepAlive 缓存，切回不重新拉取）需同步刷新 -->
+  <ScrapeDialog ref="scrapeDialogRef" @success="store.fetchTasks(); videoStore.fetchVideos()" />
   </div>
 </template>

@@ -34,6 +34,14 @@ export interface ScrapeTask {
     completedAt?: string
 }
 
+/** 刮削保存结果（后端 rs_scrape_save 返回；各步失败不中断，需据 errors 判断是否部分失败） */
+export interface ScrapeSaveResult {
+    cover_saved: boolean
+    nfo_saved: boolean
+    db_updated: boolean
+    errors: string[]
+}
+
 /** 刮削日志条目 */
 export interface ScrapeLogEntry {
     id: string

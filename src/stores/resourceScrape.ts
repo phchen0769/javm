@@ -5,7 +5,7 @@ import { ref, computed } from 'vue'
 import { toast } from 'vue-sonner'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import type { ScrapeTask, ScrapeLogEntry, ResourceItem, SourceDiagnostic, FusedScrapeResult } from '@/types'
+import type { ScrapeTask, ScrapeLogEntry, ResourceItem, SourceDiagnostic, FusedScrapeResult, ScrapeSaveResult } from '@/types'
 import { ScrapeStatus } from '@/types'
 import { useSettingsStore } from '@/stores/settings'
 
@@ -436,15 +436,25 @@ export const useResourceScrapeStore = defineStore('resourceScrape', () => {
 
     // ============ 刮削保存操作 ============
 
-    /** 从搜索结果触发刮削保存 */
-    async function scrapeSave(videoId: string, metadata: ResourceItem) {
+    /** 从搜索结果触发刮削保存。
+     *  后端各步（封面 / NFO / 写库）失败不中断，整体仍返回成功；此处按 errors 区分
+     *  「全部成功」与「元数据已入库但文件写入失败」（如网络盘拒绝写入），不再一律提示成功。 */
+    async function scrapeSave(videoId: string, metadata: ResourceItem): Promise<ScrapeSaveResult> {
         try {
-            await invoke('rs_scrape_save', { videoId, metadata })
+            const result = await invoke<ScrapeSaveResult>('rs_scrape_save', { videoId, metadata })
             // 手动选用并保存即视为对该数据源的偏好，给它加一点分
             boostSelectedSourceScore(metadata.source)
-            toast.success('刮削保存成功', {
-                description: `视频 ${videoId} 的元数据已保存`
-            })
+            if (result.errors.length > 0) {
+                toast.warning(result.db_updated ? '元数据已保存，但部分文件写入失败' : '刮削保存部分失败', {
+                    description: result.errors.join('\n'),
+                    duration: 8000,
+                })
+            } else {
+                toast.success('刮削保存成功', {
+                    description: `视频 ${videoId} 的元数据已保存`
+                })
+            }
+            return result
         } catch (e) {
             console.error('Failed to scrape save:', e)
             toast.error('刮削保存失败', {

@@ -124,9 +124,8 @@ const saveData = async (shouldClose: boolean = true) => {
 
   saving.value = true
   try {
-    // 使用 store 的 scrapeSave 方法（调用 rs_scrape_save）
+    // 使用 store 的 scrapeSave 方法（调用 rs_scrape_save）；成功/部分失败的提示由 store 统一给出
     await scrapeStore.scrapeSave(videoId.value, selectedResult.value)
-    toast.success('保存成功！')
     emit('success')
     if (shouldClose) {
       open.value = false

@@ -280,13 +280,15 @@ export const useVideoStore = defineStore('video', () => {
                     continue
                 }
 
-                // 仅在封面路径真正变化时才 bump（触发前端换图并破缓存）。
+                // 仅在封面路径真正变化、或重新刮削（scrapedAt 变化，新封面会覆盖写回原路径）时才 bump
+                //（触发前端换图并破缓存）。
                 // 不要把 scanStatus 变化也算进来：批量刮削时状态 0→1→2 频繁跳动，
                 // 会让大量卡片的封面版本号无谓地变，强制全尺寸封面重复解码，拖垮 CPU。
                 if (
                     previousVideo.poster !== nextVideo.poster ||
                     previousVideo.thumb !== nextVideo.thumb ||
-                    previousVideo.fanart !== nextVideo.fanart
+                    previousVideo.fanart !== nextVideo.fanart ||
+                    previousVideo.scrapedAt !== nextVideo.scrapedAt
                 ) {
                     bumpCoverVersion(nextVideo.id)
                 }

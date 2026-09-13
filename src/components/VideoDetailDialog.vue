@@ -746,6 +746,8 @@ const handleSave = async () => {
     }
 
     isSaving.value = true
+    // 刮削产物（封面 / NFO）写盘的失败信息：有则最终提示改为警告，不再一律报「保存成功」
+    let scrapeFileErrors: string[] = []
     try {
         // 如果有刮削的新数据（包含封面和截图），使用 save_scraped_data
         if (hasScrapedData.value) {
@@ -769,7 +771,8 @@ const handleSave = async () => {
                 targetTitle: formData.value.title,
             }
 
-            await scrapeStore.scrapeSave(props.video.id, metadata)
+            const saved = await scrapeStore.scrapeSave(props.video.id, metadata)
+            scrapeFileErrors = saved.errors
         }
 
         const updatePayload: Partial<Video> = {
@@ -812,10 +815,12 @@ const handleSave = async () => {
         isDirty.value = false
         hasScrapedData.value = false // 保存后重置刮削状态
 
-        // Show success toast
-        toast.success('保存成功', {
-            description: '视频信息已更新'
-        })
+        // Show success toast（封面/NFO 写盘失败时 store 已给出警告，这里不再叠加「保存成功」）
+        if (scrapeFileErrors.length === 0) {
+            toast.success('保存成功', {
+                description: '视频信息已更新'
+            })
+        }
     } catch (e) {
         console.error('Failed to save video details:', e)
 

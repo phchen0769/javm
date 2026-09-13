@@ -134,7 +134,21 @@
       "Read(//Volumes/Films/3T/06/ABP-485/**)",
       "Bash(sqlite3 /tmp/javm.db \"select substr\\(cover_thumb,1,15\\), count\\(*\\) from videos where cover_thumb is not null and cover_thumb!='' group by 1;\")",
       "Bash(python3 -c 'import json; d=json.load\\(open\\('\\\\''/Users/fedorov/Library/Application Support/com.ddmoyu.javm/settings.json'\\\\''\\)\\); print\\(json.dumps\\(d.get\\('\\\\''metadata'\\\\''\\), ensure_ascii=False\\)\\)')",
-      "Bash(sqlite3 /tmp/javm-probe.db \"select count\\(*\\), sum\\(file_mtime is null\\), sum\\(scan_status=2\\) from videos;\")"
+      "Bash(sqlite3 /tmp/javm-probe.db \"select count\\(*\\), sum\\(file_mtime is null\\), sum\\(scan_status=2\\) from videos;\")",
+      "Read(//Volumes/**)",
+      "Bash(sqlite3 javm.db \"SELECT substr\\(video_path,1,18\\) AS root, COUNT\\(*\\) FROM videos GROUP BY 1;\")",
+      "Bash(sqlite3 javm.db \"SELECT path, video_count FROM directories;\")",
+      "Bash(sqlite3 -header javm.db \"SELECT id, local_id, title, video_path, poster, thumb, fanart, cover_thumb, scan_status, scraped_at, updated_at, has_subtitle, file_ctime FROM videos WHERE local_id IN \\('CWPBD-045','081326_001','081326-001','PPPD-330','FC2-4856399','FC2-PPV-4856399'\\);\")",
+      "Bash(sqlite3 javm.db \"SELECT 'rating',typeof\\(rating\\),COUNT\\(*\\) FROM videos GROUP BY 2 UNION ALL SELECT 'duration',typeof\\(duration\\),COUNT\\(*\\) FROM videos GROUP BY 2 UNION ALL SELECT 'file_size',typeof\\(file_size\\),COUNT\\(*\\) FROM videos GROUP BY 2 UNION ALL SELECT 'scan_status',typeof\\(scan_status\\),COUNT\\(*\\) FROM videos GROUP BY 2 UNION ALL SELECT 'cover_width',typeof\\(cover_width\\),COUNT\\(*\\) FROM videos GROUP BY 2 UNION ALL SELECT 'part_index',typeof\\(part_index\\),COUNT\\(*\\) FROM videos GROUP BY 2 UNION ALL SELECT 'created_at',typeof\\(created_at\\),COUNT\\(*\\) FROM videos GROUP BY 2 UNION ALL SELECT 'video_path',typeof\\(video_path\\),COUNT\\(*\\) FROM videos GROUP BY 2 UNION ALL SELECT 'title',typeof\\(title\\),COUNT\\(*\\) FROM videos GROUP BY 2;\")",
+      "Bash(sqlite3 javm.db \"SELECT video_path FROM videos WHERE has_subtitle=1 LIMIT 8;\")",
+      "Bash(sqlite3 javm.db \"PRAGMA journal_mode;\")",
+      "Bash(sqlite3 javm.db \"SELECT stack_key, COUNT\\(*\\), GROUP_CONCAT\\(video_path, ' | '\\) FROM videos WHERE stack_key IS NOT NULL AND stack_key<>'' GROUP BY stack_key HAVING COUNT\\(*\\)>1;\")",
+      "Bash(sqlite3 -header javm.db \"SELECT local_id, stack_key, part_index, dir_path, scan_status, original_title FROM videos WHERE video_path LIKE '/Volumes/Films%';\")",
+      "Bash(sqlite3 -header javm.db \"SELECT substr\\(id,1,8\\) id, local_id, substr\\(title,1,24\\) title, video_path, poster IS NOT NULL AS has_poster, cover_thumb IS NOT NULL AS has_thumbsm, scan_status, scraped_at, updated_at, file_ctime IS NOT NULL AS has_ctime, has_subtitle, stack_key, part_index FROM videos WHERE scraped_at >= '2026-09-12 16:30' OR updated_at >= '2026-09-12T16:30' OR updated_at >= '2026-09-12 16:30' ORDER BY updated_at;\")",
+      "Bash(sqlite3 -header javm.db \"SELECT substr\\(id,1,8\\) id, local_id, title, video_path, scan_status, scraped_at FROM videos WHERE local_id LIKE '012413%' OR video_path LIKE '%012413%' OR id LIKE 'b7ae5838%';\")",
+      "Bash(sqlite3 -header javm.db \"SELECT substr\\(id,1,8\\) id, local_id, title, video_path, scan_status, scraped_at FROM videos WHERE local_id LIKE 'MMZ-011%' OR video_path LIKE '%MMZ-011%';\")",
+      "Bash(awk 'NR>=2157 && NR<=2330' src-tauri/src/resource_scrape/commands.rs)",
+      "Bash(git --no-pager diff --stat)"
     ],
     "deny": [
       "Bash(git reset --hard *)",
