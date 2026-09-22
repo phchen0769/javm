@@ -287,8 +287,18 @@ onDeactivated(() => {
   }
 })
 
+// 翻页后回到顶部（并清掉记忆的滚动位置，避免 KeepAlive 切回时又跳回旧页的位置）
+const scrollToTop = () => {
+  savedScrollTop.value = 0
+  scrollTop.value = 0
+  if (containerRef.value) {
+    containerRef.value.scrollTop = 0
+  }
+}
+
 defineExpose({
   refreshLayout: syncLayout,
+  scrollToTop,
 })
 </script>
 
