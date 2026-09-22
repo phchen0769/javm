@@ -572,9 +572,17 @@ pub(crate) async fn apply_images(
     let client = crate::resource_scrape::fingerprint_client::shared_client().ok();
     let mut result = ApplyImagesResult { cover: None, screenshots: Vec::new() };
 
-    // 封面：下载横版 → 标准图集(fanart+thumb+裁 poster) → 写库
+    // 封面：下载横版 → 标准图集(fanart+thumb+裁 poster) → 写库（用户显式选图，不做 DMM 回退）
     if let Some(url) = cover_url.map(str::trim).filter(|u| !u.is_empty()) {
-        let artwork = crate::media::artwork::produce_artwork(&dir, &stem, url, "", client.as_ref()).await;
+        let artwork = crate::media::artwork::produce_artwork(
+            &dir,
+            &stem,
+            std::slice::from_ref(&url.to_string()),
+            "",
+            None,
+            client.as_ref(),
+        )
+        .await;
         if artwork.fanart.is_some() || artwork.poster.is_some() {
             let db_inner = db.clone();
             let vid = video_id.to_string();
@@ -762,4 +770,171 @@ pub async fn batch_fetch_covers(
         skipped: skipped.load(Ordering::Relaxed),
         failed: failed.load(Ordering::Relaxed),
     })
+}
+
+/// 批量重取「无法解码的封面」：有 fanart 但读不出尺寸的视频（几乎都是被存成 .jpg 的 AVIF，
+/// 本应用裁不出竖版海报、Jellyfin 也显示不了）。对每个视频重新多源刮削拿封面候选，
+/// 由 `produce_artwork` 逐个回退（下载层拒绝 AVIF）、最后回退 DMM 直拼；拿到可解码封面即
+/// 覆盖图集并写库。进度通过 `batch-refetch-cover-progress` 事件推送。
+#[tauri::command]
+pub async fn batch_refetch_unsupported_covers(
+    app: AppHandle,
+    db: State<'_, Database>,
+) -> AppResult<BatchFetchResult> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let db = db.inner().clone();
+    let targets: Vec<(String, String, String)> = {
+        let db_inner = db.clone();
+        tokio::task::spawn_blocking(move || -> AppResult<Vec<(String, String, String)>> {
+            let conn = db_inner.get_connection()?;
+            let mut stmt = conn.prepare(
+                "SELECT id, video_path, COALESCE(local_id, '') FROM videos
+                 WHERE fanart IS NOT NULL AND fanart <> '' AND cover_width IS NULL
+                 ORDER BY video_path",
+            )?;
+            let iter = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })?;
+            let mut list = Vec::new();
+            for item in iter {
+                list.push(item?);
+            }
+            Ok(list)
+        })
+        .await
+        .map_err(|e| AppError::TaskJoin(e.to_string()))??
+    };
+
+    let total = targets.len();
+    let settings = crate::settings::get_settings(app.clone()).await.unwrap_or_default();
+    let cfg = Arc::new(crate::media::storage::MetadataStorageConfig::from_settings(&settings));
+    let applied = Arc::new(AtomicUsize::new(0));
+    let skipped = Arc::new(AtomicUsize::new(0));
+    let failed = Arc::new(AtomicUsize::new(0));
+    let done = Arc::new(AtomicUsize::new(0));
+    // 每个视频要跑一次多源刮削，并发压低，避免触发站点限流
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(2));
+
+    let mut handles = Vec::new();
+    for (video_id, video_path, code) in targets {
+        let app = app.clone();
+        let db = db.clone();
+        let cfg = cfg.clone();
+        let (applied, skipped, failed, done) =
+            (applied.clone(), skipped.clone(), failed.clone(), done.clone());
+        let semaphore = semaphore.clone();
+
+        handles.push(tokio::spawn(async move {
+            let _permit = semaphore.acquire_owned().await.ok();
+            let status = if code.trim().is_empty() {
+                skipped.fetch_add(1, Ordering::Relaxed);
+                "skipped"
+            } else {
+                match refetch_cover_for_video(&app, &db, &cfg, &video_id, &video_path, &code).await {
+                    Ok(true) => {
+                        applied.fetch_add(1, Ordering::Relaxed);
+                        "applied"
+                    }
+                    Ok(false) => {
+                        skipped.fetch_add(1, Ordering::Relaxed);
+                        "skipped"
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "[cover_refetch] event=failed video_id={} code={} error={}",
+                            video_id, code, e
+                        );
+                        failed.fetch_add(1, Ordering::Relaxed);
+                        "failed"
+                    }
+                }
+            };
+            let d = done.fetch_add(1, Ordering::Relaxed) + 1;
+            let _ = app.emit(
+                "batch-refetch-cover-progress",
+                serde_json::json!({ "videoId": video_id, "status": status, "done": d, "total": total }),
+            );
+        }));
+    }
+    for handle in handles {
+        let _ = handle.await;
+    }
+
+    Ok(BatchFetchResult {
+        total,
+        applied: applied.load(Ordering::Relaxed),
+        skipped: skipped.load(Ordering::Relaxed),
+        failed: failed.load(Ordering::Relaxed),
+    })
+}
+
+/// 重取单个视频的封面：多源刮削取候选（失败则只剩 DMM 回退）→ 产出图集 → 写库。
+/// 返回 `Ok(true)` 已换上可解码封面，`Ok(false)` 无可用来源（保持现状）。
+async fn refetch_cover_for_video(
+    app: &AppHandle,
+    db: &Database,
+    cfg: &crate::media::storage::MetadataStorageConfig,
+    video_id: &str,
+    video_path: &str,
+    code: &str,
+) -> AppResult<bool> {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let (candidates, poster_url, title) =
+        match crate::resource_scrape::commands::scrape_and_fuse(app, code, None, &cancel).await {
+            Ok(outcome) => match outcome.result {
+                Some(r) => {
+                    let mut c = vec![r.cover_url.clone()];
+                    c.extend(r.cover_candidates.iter().cloned());
+                    (c, r.poster_url.clone(), r.title.clone())
+                }
+                None => (Vec::new(), String::new(), String::new()),
+            },
+            Err(e) => {
+                log::info!("[cover_refetch] event=scrape_failed code={} error={}", code, e);
+                (Vec::new(), String::new(), String::new())
+            }
+        };
+
+    let target = crate::media::storage::resolve_asset_target(video_path, code, &title, cfg)
+        .map_err(AppError::Business)?;
+    if let Err(e) = crate::media::storage::ensure_asset_dir_and_strm(&target) {
+        log::warn!("[cover_refetch] event=ensure_dir_failed video_id={} error={}", video_id, e);
+    }
+    let client = crate::resource_scrape::fingerprint_client::shared_client().ok();
+    let artwork = crate::media::artwork::produce_artwork(
+        &target.dir,
+        &target.stem,
+        &candidates,
+        &poster_url,
+        Some(code),
+        client.as_ref(),
+    )
+    .await;
+    if artwork.fanart.is_none() && artwork.poster.is_none() {
+        return Ok(false);
+    }
+
+    let (cover_width, cover_height) =
+        crate::media::artwork::read_image_dimensions(artwork.primary_dimension_path());
+    let db = db.clone();
+    let vid = video_id.to_string();
+    tokio::task::spawn_blocking(move || -> AppResult<()> {
+        let conn = db.get_connection()?;
+        crate::db::Database::update_video_cover_paths(
+            &conn,
+            &vid,
+            artwork.poster.as_deref(),
+            artwork.thumb.as_deref(),
+            artwork.fanart.as_deref(),
+            cover_width,
+            cover_height,
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| AppError::TaskJoin(e.to_string()))??;
+    log::info!("[cover_refetch] event=cover_replaced video_id={} code={}", video_id, code);
+    Ok(true)
 }

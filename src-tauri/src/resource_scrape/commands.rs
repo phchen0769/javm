@@ -1721,6 +1721,13 @@ pub fn search_result_to_metadata(sr: &SearchResult) -> ScrapeMetadata {
         } else {
             sr.cover_url.clone()
         },
+        // 回退候选：原始远程封面（cover_url 可能已换成本地代理缓存）+ 融合阶段收集的各源封面
+        cover_candidates: sr
+            .remote_cover_url
+            .iter()
+            .cloned()
+            .chain(sr.cover_candidates.iter().cloned())
+            .collect(),
         actors: sr
             .actors
             .split(',')
@@ -1788,8 +1795,9 @@ pub(crate) struct PreparedScrapeVideo {
 pub(crate) fn prepare_video_for_scrape_save(
     db: &Database,
     video_id: &str,
+    storage_cfg: &crate::media::storage::MetadataStorageConfig,
 ) -> Result<PreparedScrapeVideo, String> {
-    prepare_video_for_scrape_save_with_target_title(db, video_id, None)
+    prepare_video_for_scrape_save_with_target_title(db, video_id, None, storage_cfg)
 }
 
 #[cfg(test)]
@@ -1891,7 +1899,53 @@ mod tests {
     }
 }
 
+/// 刮削保存前整理视频布局：按目标标题改名 / 归入同名目录（原有逻辑），
+/// 再把分段影片各段改成媒体库通用的 `<基名>-cd<N>` 命名（Jellyfin 等才会合并成一部多段影片）。
+/// 分段改名失败只记日志、不中断刮削。
 pub(crate) fn prepare_video_for_scrape_save_with_target_title(
+    db: &Database,
+    video_id: &str,
+    target_title: Option<&str>,
+    storage_cfg: &crate::media::storage::MetadataStorageConfig,
+) -> Result<PreparedScrapeVideo, String> {
+    let prepared = prepare_video_layout_for_scrape_save(db, video_id, target_title)?;
+
+    let moved = match crate::media::assets::normalize_stack_part_names(&prepared.video_path) {
+        Ok(moved) => moved,
+        Err(e) => {
+            log::warn!(
+                "[scrape_save] event=stack_rename_failed video_id={} path={} error={}",
+                video_id, prepared.video_path, e
+            );
+            return Ok(prepared);
+        }
+    };
+    if moved.is_empty() {
+        return Ok(prepared);
+    }
+
+    let conn = db.get_connection().map_err(|e| e.to_string())?;
+    crate::video::service::apply_stack_renames_to_db(&conn, storage_cfg, &moved)?;
+
+    let video_path = moved
+        .iter()
+        .find(|(old, _)| old == &prepared.video_path)
+        .map(|(_, new)| new.clone())
+        .unwrap_or(prepared.video_path);
+    let new = std::path::Path::new(&video_path);
+    log::info!(
+        "[scrape_save] event=stack_parts_renamed video_id={} video_path={} renamed={}",
+        video_id, video_path, moved.len()
+    );
+    Ok(PreparedScrapeVideo {
+        poster: crate::media::assets::find_sibling_artwork(new, "poster"),
+        thumb: crate::media::assets::find_sibling_artwork(new, "thumb"),
+        fanart: crate::media::assets::find_sibling_artwork(new, "fanart"),
+        video_path,
+    })
+}
+
+fn prepare_video_layout_for_scrape_save(
     db: &Database,
     video_id: &str,
     target_title: Option<&str>,
@@ -2034,10 +2088,14 @@ pub async fn rs_scrape_save(
         metadata.cover_url.len()
     );
     let db = Database::new(&app).map_err(|e| e.to_string())?;
+    let storage_cfg = crate::media::storage::MetadataStorageConfig::from_settings(
+        &crate::settings::get_settings(app.clone()).await.unwrap_or_default(),
+    );
     let prepared_video = prepare_video_for_scrape_save_with_target_title(
         &db,
         &video_id,
         metadata.target_title.as_deref(),
+        &storage_cfg,
     )?;
     let video_path = prepared_video.video_path.clone();
     log::info!("[scrape_save] event=video_prepared video_id={} path={}", video_id, video_path);

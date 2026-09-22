@@ -332,7 +332,11 @@ impl TaskQueueManager {
             }
         }
         let video_id = self.find_video_id_by_path(&task.path)?;
-        let prepared_video = super::commands::prepare_video_for_scrape_save(&self.db, &video_id)?;
+        let storage_cfg = crate::media::storage::MetadataStorageConfig::from_settings(
+            &crate::settings::get_settings(self.app.clone()).await.unwrap_or_default(),
+        );
+        let prepared_video =
+            super::commands::prepare_video_for_scrape_save(&self.db, &video_id, &storage_cfg)?;
         let video_path = prepared_video.video_path.clone();
 
         // 进度 2：准备就绪

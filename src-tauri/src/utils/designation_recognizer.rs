@@ -206,6 +206,36 @@ static STACK_BARE_NUM_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(
     Regex::new(r"(?i)^(.*-\d+)[\s._-]0*(\d{1,3})(?:部|集|話|话)?$").unwrap()
 });
 
+/// 分段文件名解析：D2Pass 系「番号-厂牌词-裸数字」（`012413-001-carib-1` / `110615_001-1pon-2`）。
+/// 基名以厂牌词结尾、非数字，裸数字规则认不出；厂牌词限已知缩写，序号限 1-2 位，
+/// 避免把 `-carib-1080p` 之类分辨率当成第 1080 段（`1080p` 带字母本就不匹配，双保险）。
+static STACK_D2PASS_BARE_NUM_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^(\d{6}[-_]\d{2,3}[\s._-]+(?:carib|caribbean|caribbeancom|caribpr|caribbeancompr|1pon|1pondo|10mu|10musume|paco|pacopacomama|mura|muramura))[\s._-]+0*(\d{1,2})$",
+    )
+    .unwrap()
+});
+
+/// 分段文件的**规范文件名 stem**：`<基名>-cd<序号>`（`FC2-PPV-2458342-cd1`）。
+///
+/// 这是 Jellyfin / Emby / Kodi / Plex 共同认可的堆叠命名（分隔符 + `cd|part|pt|disc|dvd` + 序号）：
+/// 同目录下 `X-cd1.mp4`、`X-cd2.mp4` 会合并为一部多段影片并顺序连播；而本应用早期产出的
+/// `X-1.mp4` / `XPart01.mp4` 在这些媒体库里各段会被当成独立影片。
+/// 刮削落盘与「整理分段命名」都按此改名，[`parse_stack_part`] 能把它解析回 `(基名, 序号)`。
+/// `base` 保留调用方给的大小写（通常取自原文件名，见 `media::assets::stack_group_dir_name`）。
+pub fn canonical_stack_stem(base: &str, part_index: i64) -> String {
+    format!("{}-cd{}", base.trim(), part_index)
+}
+
+/// 文件名 stem 是否已是该分段组的规范写法（`<基名>-cd<序号>`，基名比对忽略大小写）。
+pub fn is_canonical_stack_stem(file_stem: &str, base: &str, part_index: i64) -> bool {
+    let lower = file_stem.to_ascii_lowercase();
+    let Some((prefix, rest)) = lower.rsplit_once("-cd") else {
+        return false;
+    };
+    prefix.eq_ignore_ascii_case(base.trim()) && rest.parse::<i64>().ok() == Some(part_index)
+}
+
 /// 已知无码厂牌前缀（番号本身即无码作品）。纯数字前缀（加勒比/一本道/天然むすめ/帕高等）
 /// 另行按"前缀全为数字"判定，Tokyo-Hot 的 `n0698` 格式按 [`TOKYOHOT_RE`] 判定，均不在此列。
 /// 末行为 AVE 系无码 DVD 厂牌（S Model / Catwalk Poison / Sky Angel / Laforet / Red Hot Jam / Kirari）
@@ -462,6 +492,16 @@ pub fn parse_stack_part(file_stem: &str) -> Option<(String, i64)> {
     // 番号后接裸数字分段（无单位词），如 FC2-PPV-2458342-2 → ("FC2-PPV-2458342", 2)。
     // 放在最后作兜底：显式单位词/字母后缀优先，裸数字歧义最大，仅在基名含连字符时才认。
     if let Some(cap) = STACK_BARE_NUM_RE.captures(s) {
+        let base = strip_base(&cap[1]);
+        if let Ok(idx) = cap[2].parse::<i64>() {
+            if !base.is_empty() && idx >= 1 {
+                return Some((base, idx));
+            }
+        }
+    }
+
+    // D2Pass 系「番号-厂牌词-裸数字」（012413-001-carib-1），基名含厂牌词，与画质词分段规则口径一致
+    if let Some(cap) = STACK_D2PASS_BARE_NUM_RE.captures(s) {
         let base = strip_base(&cap[1]);
         if let Ok(idx) = cap[2].parse::<i64>() {
             if !base.is_empty() && idx >= 1 {
@@ -1407,6 +1447,56 @@ mod tests {
         assert_eq!(parse_stack_part("012413-001-carib-1080p"), None);
         assert_eq!(parse_stack_part("SSIS-001-HD720"), None);
         assert_eq!(parse_stack_part("122720-001-carib"), None);
+    }
+
+    #[test]
+    fn parse_stack_part_recognizes_d2pass_bare_number_after_studio_word() {
+        // 用户实际场景：012413-001-carib-1.mp4 + 012413-001-carib-2.mp4 同目录两段
+        assert_eq!(parse_stack_part("012413-001-carib-1"), Some(("012413-001-CARIB".into(), 1)));
+        assert_eq!(parse_stack_part("012413-001-carib-2"), Some(("012413-001-CARIB".into(), 2)));
+        assert_eq!(parse_stack_part("110615_001-1pon-2"), Some(("110615_001-1PON".into(), 2)));
+        // 与画质词分段基名一致，可归并到同一组
+        assert_eq!(
+            parse_stack_part("012413-001-carib-1").unwrap().0,
+            parse_stack_part("012413-001-carib-fhd2").unwrap().0
+        );
+        // 厂牌词后无序号 / 分辨率 / 未知词都不是分段
+        assert_eq!(parse_stack_part("121521-001-carib"), None);
+        assert_eq!(parse_stack_part("121521-001-carib-1080p"), None);
+        assert_eq!(parse_stack_part("121521-001-xxxx-1"), None);
+    }
+
+    #[test]
+    fn canonical_stack_stem_round_trips_through_parse() {
+        // 规范命名 <基名>-cd<N>（Jellyfin/Emby/Kodi/Plex 通用堆叠规则）须能被自身规则解析回来
+        for (base, idx) in [("FC2-PPV-2458342", 1), ("IPVR-050", 3), ("012413-001-carib", 2), ("SSIS-724", 12)] {
+            let stem = canonical_stack_stem(base, idx);
+            assert_eq!(stem, format!("{}-cd{}", base, idx));
+            assert_eq!(parse_stack_part(&stem), Some((base.to_uppercase(), idx)));
+            assert!(is_canonical_stack_stem(&stem, base, idx));
+            assert!(is_canonical_stack_stem(&stem, &base.to_uppercase(), idx));
+        }
+        // 大小写不敏感、序号错位/旧写法都不算规范
+        assert!(is_canonical_stack_stem("ipvr-050-CD2", "IPVR-050", 2));
+        assert!(!is_canonical_stack_stem("IPVR-050-cd2", "IPVR-050", 1));
+        assert!(!is_canonical_stack_stem("IPVR-050-2", "IPVR-050", 2));
+        assert!(!is_canonical_stack_stem("IPVR-050Part02", "IPVR-050", 2));
+        assert!(!is_canonical_stack_stem("IPVR-050-cd", "IPVR-050", 1));
+    }
+
+    #[test]
+    fn canonical_stack_stem_keeps_designation_recognizable() {
+        // 改名后番号识别不受影响，且 cd 后缀被记为分片标记
+        let r = DesignationRecognizer::new();
+        let info = r.recognize_detailed("FC2-PPV-2458342-cd2.mp4").unwrap();
+        assert_eq!(info.designation, "FC2-2458342");
+        assert_eq!(info.markers.part.as_deref(), Some("CD2"));
+        let info = r.recognize_detailed("IPVR-050-cd1.mp4").unwrap();
+        assert_eq!(info.designation, "IPVR-050");
+        assert_eq!(info.markers.part.as_deref(), Some("CD1"));
+        let info = r.recognize_detailed("012413-001-carib-cd2.mp4").unwrap();
+        assert_eq!(info.designation, "012413-001");
+        assert_eq!(info.markers.studio.as_deref(), Some("Caribbeancom"));
     }
 
     #[test]

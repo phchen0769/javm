@@ -288,12 +288,20 @@ pub async fn write_scraped_media(
         .map(|t| (t.dir.clone(), t.stem.clone()))
         .unwrap_or_else(|| follow_video_dir_stem(video_path));
 
-    // 2. 标准图集 poster(竖)/fanart(横)/thumb(横)
+    // 2. 标准图集 poster(竖)/fanart(横)/thumb(横)：主封面 + 跨源候选逐个回退，再回退 DMM 直拼
+    let mut cover_candidates: Vec<String> = Vec::with_capacity(1 + metadata.cover_candidates.len());
+    cover_candidates.push(metadata.cover_url.clone());
+    for c in &metadata.cover_candidates {
+        if !cover_candidates.contains(c) {
+            cover_candidates.push(c.clone());
+        }
+    }
     let produced = crate::media::artwork::produce_artwork(
         &dir,
         &stem,
-        &metadata.cover_url,
+        &cover_candidates,
         &metadata.poster_url,
+        Some(&metadata.local_id),
         None,
     )
     .await;

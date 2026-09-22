@@ -485,6 +485,7 @@ pub(crate) fn build_nfo_metadata_for_update(
             .and_then(|nfo| nfo.remote_cover_url.clone())
             .or_else(|| parsed_nfo.and_then(|nfo| nfo.poster_url.clone()))
             .unwrap_or_default(),
+        cover_candidates: Vec::new(),
         actors,
         actor_avatars: Vec::new(),
         director,
@@ -520,6 +521,52 @@ pub(crate) fn build_nfo_metadata_for_update(
             .map(|nfo| nfo.thumb_urls.clone())
             .unwrap_or_default(),
     }
+}
+
+/// 分段改名（`X-1.mp4` → `X-cd1.mp4`，见 `media::assets::normalize_stack_part_names`）后同步库内记录：
+/// 按原路径定位，图集路径按新文件名重新探测同级文件，网格缩略图作废，独立目录模式下改写 .strm。
+/// 尚未入库的段跳过，等下次扫描按新位置入库。
+pub(crate) fn apply_stack_renames_to_db(
+    conn: &rusqlite::Connection,
+    cfg: &crate::media::storage::MetadataStorageConfig,
+    moved: &[(String, String)],
+) -> Result<(), String> {
+    use rusqlite::OptionalExtension;
+
+    for (old_path, new_path) in moved {
+        let row: Option<(String, String)> = conn
+            .query_row(
+                "SELECT id, COALESCE(local_id, '') FROM videos WHERE video_path = ?1",
+                [old_path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let Some((video_id, local_id)) = row else {
+            continue;
+        };
+        let new = std::path::Path::new(new_path);
+        let dir_path = new
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        Database::update_video_file_location(
+            conn,
+            &video_id,
+            old_path,
+            new_path,
+            &dir_path,
+            crate::media::assets::find_sibling_artwork(new, "poster").as_deref(),
+            crate::media::assets::find_sibling_artwork(new, "thumb").as_deref(),
+            crate::media::assets::find_sibling_artwork(new, "fanart").as_deref(),
+        )
+        .map_err(|e| e.to_string())?;
+        Database::clear_cover_thumb(conn, &video_id).map_err(|e| e.to_string())?;
+        if let Err(e) = crate::media::storage::sync_independent_strm(cfg, &local_id, new_path) {
+            log::warn!("[stack_rename] event=sync_strm_failed video_id={} error={}", video_id, e);
+        }
+    }
+    Ok(())
 }
 
 /// 确保视频在独立的同名目录中，并更新数据库。

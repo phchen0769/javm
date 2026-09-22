@@ -141,42 +141,84 @@ pub fn generate_cover_thumbnail(source: &Path, dir: &Path, stem: &str) -> Option
 /// 从远程/缓存 URL 产出标准图集。
 ///
 /// 流程：
-/// 1. 下载横版大图（`cover_url` 优先，回退 `poster_url`）→ `fanart`。
+/// 1. 横版大图：按 `cover_candidates` 顺序逐个下载（下载层会拒绝 AVIF / 非图片），
+///    首个成功者作 `fanart`；全部失败且给了番号时，回退 DMM 官方 CDN 直拼封面
+///    （jav.place 等站点的封面 CDN 只回 AVIF，此前整片无海报的根因）。
 /// 2. 复制 `fanart` → `thumb`。
-/// 3. 竖版海报：源竖版优先（`poster_url` 与 `cover_url` 不同且下载后为竖版）→ 否则从横版右裁。
+/// 3. 竖版海报：源竖版优先（`poster_url` 不在候选里且下载后为竖版）→ 否则从横版右裁。
 ///
 /// `dir` 须已存在。任一步失败不阻断其余步骤，缺项返回 None。
 pub async fn produce_artwork(
     dir: &Path,
     stem: &str,
-    cover_url: &str,
+    cover_candidates: &[String],
     poster_url: &str,
+    fallback_code: Option<&str>,
     client: Option<&HttpClient>,
 ) -> ArtworkResult {
     let mut result = ArtworkResult::default();
 
-    // 1. 横版大图（fanart）：cover_url 优先，回退 poster_url
-    let landscape_url = if !cover_url.trim().is_empty() {
-        cover_url
-    } else {
-        poster_url
-    };
-    if landscape_url.trim().is_empty() {
-        return result;
+    // 1. 横版大图（fanart）：候选逐个尝试，poster_url 兜底，再回退 DMM
+    let mut landscape_urls: Vec<&str> = cover_candidates
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !poster_url.trim().is_empty() && !landscape_urls.contains(&poster_url.trim()) {
+        landscape_urls.push(poster_url.trim());
     }
+    landscape_urls.dedup();
 
     let fanart_path = artwork_path(dir, stem, FANART_SUFFIX);
-    match crate::download::image::save_image_url_to(landscape_url, &fanart_path, client).await {
-        Ok(path) if !path.is_empty() => result.fanart = Some(path),
-        Ok(_) => return result,
-        Err(e) => {
-            log::error!("[artwork] event=fanart_download_failed stem={} error={}", stem, e);
-            return result;
+    let mut landscape_used: Option<String> = None;
+    for url in &landscape_urls {
+        match crate::download::image::save_image_url_to(url, &fanart_path, client).await {
+            Ok(path) if !path.is_empty() => {
+                landscape_used = Some(url.to_string());
+                result.fanart = Some(path);
+                break;
+            }
+            Ok(_) => {}
+            Err(e) => log::info!(
+                "[artwork] event=fanart_candidate_skipped stem={} url={} error={}",
+                stem, url, e
+            ),
         }
     }
-    let fanart_path = match result.fanart.as_deref() {
-        Some(p) => PathBuf::from(p),
-        None => return result,
+    if result.fanart.is_none() {
+        if let Some(code) = fallback_code.map(str::trim).filter(|c| !c.is_empty()) {
+            let owned;
+            let dmm_client = match client {
+                Some(c) => Some(c),
+                None => {
+                    owned = crate::resource_scrape::fingerprint_client::shared_client().ok();
+                    owned.as_ref()
+                }
+            };
+            if let Some(c) = dmm_client {
+                if let Some(url) = crate::media::dmm::probe_dmm_cover(c, code).await {
+                    match crate::download::image::save_image_url_to(&url, &fanart_path, Some(c)).await {
+                        Ok(path) if !path.is_empty() => {
+                            log::info!("[artwork] event=fanart_from_dmm_fallback stem={} url={}", stem, url);
+                            landscape_used = Some(url);
+                            result.fanart = Some(path);
+                        }
+                        Ok(_) => {}
+                        Err(e) => log::info!("[artwork] event=dmm_fallback_failed stem={} error={}", stem, e),
+                    }
+                }
+            }
+        }
+    }
+    let Some(fanart_path) = result.fanart.as_deref().map(PathBuf::from) else {
+        if !landscape_urls.is_empty() {
+            log::error!(
+                "[artwork] event=fanart_download_failed stem={} tried={} error=所有封面候选均不可用",
+                stem,
+                landscape_urls.len()
+            );
+        }
+        return result;
     };
 
     // 2. 横版缩略（thumb）= 复制 fanart
@@ -188,7 +230,8 @@ pub async fn produce_artwork(
 
     // 3. 竖版海报（poster）：源竖版优先 → 横版右裁兜底
     let poster_path = artwork_path(dir, stem, POSTER_SUFFIX);
-    let from_source = save_native_portrait(&poster_path, cover_url, poster_url, client).await;
+    let landscape_used = landscape_used.unwrap_or_default();
+    let from_source = save_native_portrait(&poster_path, &landscape_used, poster_url, client).await;
     if from_source || crop_landscape_to_poster(&fanart_path, &poster_path) {
         result.poster = Some(poster_path.to_string_lossy().to_string());
     }
@@ -334,3 +377,4 @@ mod tests {
         assert_eq!(art2.primary_dimension_path(), Some("p.jpg"));
     }
 }
+

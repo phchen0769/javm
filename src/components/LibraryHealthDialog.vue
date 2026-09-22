@@ -8,7 +8,7 @@ import {
     DialogFooter,
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
-import { Loader2, RefreshCw, ImageOff, FileX, ScanLine, AlertTriangle, Hash, Film } from 'lucide-vue-next'
+import { Loader2, RefreshCw, ImageOff, FileX, ScanLine, AlertTriangle, Hash, Film, Layers } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
@@ -37,6 +37,8 @@ interface LibraryHealth {
     missingCover: number
     missingNfo: number
     missingCode: number
+    unsupportedCover: number
+    nonstandardStack: number
 }
 
 const loading = ref(false)
@@ -45,6 +47,12 @@ const health = ref<LibraryHealth | null>(null)
 const batchRunning = ref(false)
 const batchDone = ref(0)
 const batchTotal = ref(0)
+
+const refetchRunning = ref(false)
+const refetchDone = ref(0)
+const refetchTotal = ref(0)
+
+const stackRunning = ref(false)
 
 const fetchHealth = async () => {
     loading.value = true
@@ -99,6 +107,51 @@ watch(
         if (o) fetchHealth()
     },
 )
+
+// 封面无法解码（AVIF 假 jpg 等）批量重取：重新刮削取候选 → 跳过 AVIF → DMM 兜底
+const refetchUnsupportedCovers = async () => {
+    if (refetchRunning.value) return
+    refetchRunning.value = true
+    refetchDone.value = 0
+    refetchTotal.value = health.value?.unsupportedCover ?? 0
+    let unlisten: (() => void) | null = null
+    try {
+        unlisten = await listen<{ done: number; total: number }>('batch-refetch-cover-progress', (e) => {
+            refetchDone.value = e.payload.done
+            refetchTotal.value = e.payload.total
+        })
+        const r = await invoke<{ applied: number; skipped: number; failed: number }>('batch_refetch_unsupported_covers')
+        toast.success(
+            `完成：${r.applied} 已替换，${r.skipped} 无可用来源` + (r.failed ? `，${r.failed} 失败` : ''),
+        )
+        if (r.applied > 0) await videoStore.fetchVideos()
+        await fetchHealth()
+    } catch (e) {
+        console.error('批量重取封面失败:', e)
+        toast.error('批量重取失败: ' + String(e))
+    } finally {
+        if (unlisten) unlisten()
+        refetchRunning.value = false
+    }
+}
+
+// 分段命名整理：X-1.mp4 → X-cd1.mp4（Jellyfin/Emby/Kodi 才会合并成一部多段影片）
+const normalizeStackNames = async () => {
+    if (stackRunning.value) return
+    if (!confirm('将把分段影片的文件名改为「番号-cd1 / -cd2 …」（NFO、封面、字幕随之改名），Jellyfin 等媒体库才能识别为同一部影片。继续？')) return
+    stackRunning.value = true
+    try {
+        const renamed = await invoke<number>('normalize_stack_filenames')
+        toast.success(renamed > 0 ? `已改名 ${renamed} 个分段文件` : '分段命名均已规范，无需改动')
+        if (renamed > 0) await videoStore.fetchVideos()
+        await fetchHealth()
+    } catch (e) {
+        console.error('整理分段命名失败:', e)
+        toast.error('整理失败: ' + String(e))
+    } finally {
+        stackRunning.value = false
+    }
+}
 </script>
 
 <template>
@@ -175,6 +228,46 @@ watch(
                             非标准库
                         </Button>
                     </div>
+                </div>
+
+                <div class="rounded-lg border p-3" :class="health.unsupportedCover > 0 ? 'border-amber-500/50 bg-amber-500/5' : ''">
+                    <div class="flex items-center gap-2 text-muted-foreground text-sm">
+                        <ImageOff class="size-4" />封面无法解码
+                    </div>
+                    <div class="flex items-end justify-between mt-1">
+                        <div class="text-2xl font-semibold tabular-nums">{{ health.unsupportedCover }}</div>
+                        <Button
+                            v-if="health.unsupportedCover > 0"
+                            size="sm"
+                            variant="outline"
+                            class="h-7 text-xs"
+                            :disabled="refetchRunning"
+                            @click="refetchUnsupportedCovers"
+                        >
+                            {{ refetchRunning ? `${refetchDone}/${refetchTotal}` : '批量重取' }}
+                        </Button>
+                    </div>
+                    <p class="mt-1 text-[11px] text-muted-foreground">多为 AVIF 假 jpg，本应用与 Jellyfin 都打不开</p>
+                </div>
+
+                <div class="rounded-lg border p-3" :class="health.nonstandardStack > 0 ? 'border-amber-500/50 bg-amber-500/5' : ''">
+                    <div class="flex items-center gap-2 text-muted-foreground text-sm">
+                        <Layers class="size-4" />分段命名不规范
+                    </div>
+                    <div class="flex items-end justify-between mt-1">
+                        <div class="text-2xl font-semibold tabular-nums">{{ health.nonstandardStack }}</div>
+                        <Button
+                            v-if="health.nonstandardStack > 0"
+                            size="sm"
+                            variant="outline"
+                            class="h-7 text-xs"
+                            :disabled="stackRunning"
+                            @click="normalizeStackNames"
+                        >
+                            {{ stackRunning ? '整理中…' : '改为 -cd1 命名' }}
+                        </Button>
+                    </div>
+                    <p class="mt-1 text-[11px] text-muted-foreground">Jellyfin/Emby 只认 X-cd1、X-cd2 才会合并连播</p>
                 </div>
             </div>
 

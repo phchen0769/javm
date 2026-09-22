@@ -224,6 +224,11 @@ pub struct ScrapeMetadata {
     #[serde(default, deserialize_with = "deserialize_null_as_empty_string")]
     pub cover_url: String,
 
+    /// 跨源封面候选（`cover_url` 之外的其它源封面，按评分降序）。落盘时主封面下载失败或
+    /// 为 AVIF 等不可用格式，逐个回退，尽量拿到一张能解码的横版图。
+    #[serde(default, deserialize_with = "deserialize_null_as_empty_vec")]
+    pub cover_candidates: Vec<String>,
+
     /// 演员列表
     #[serde(default, deserialize_with = "deserialize_null_as_empty_vec")]
     pub actors: Vec<String>,

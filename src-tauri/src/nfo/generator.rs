@@ -4,24 +4,15 @@ use quick_xml::Writer;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
-/// NFO 内引用的本地图集（同目录相对文件名，如 `ABC-123-poster.jpg`）
-///
-/// 媒体库按文件名约定发现图集、且本地文件优先于 URL，故 NFO 仅引用本地相对文件名，
-/// 不写远程封面 URL（对齐 JavSP/Emby/Kodi/Jellyfin 实践）。
-#[derive(Debug, Clone, Default)]
-pub struct NfoArtwork {
-    /// 竖版海报相对文件名
-    pub poster: Option<String>,
-    /// 横版背景图相对文件名
-    pub fanart: Option<String>,
-    /// 横版缩略相对文件名
-    pub thumb: Option<String>,
-}
-
 /// NFO 文件生成器
 ///
 /// 生成兼容 Kodi/Emby/Jellyfin 的 NFO 文件（XML 格式），
 /// 带 UTF-8 BOM 以确保 Windows 下正确显示中文。
+///
+/// 图集（poster / fanart / thumb）**不写入 NFO**：媒体库一律按同目录文件名约定
+/// （`<stem>-poster.jpg` / `<stem>-fanart.jpg` / `extrafanart/`）发现本地图，
+/// 而 Jellyfin 对 `<thumb>` / `<fanart>` 内的相对文件名会判为无效 URI 并逐条记 ERROR
+/// （"is not a valid URL or file path"），写了只有噪音没有收益。
 pub struct NfoGenerator;
 
 impl NfoGenerator {
@@ -34,15 +25,10 @@ impl NfoGenerator {
     ///
     /// # 参数
     /// * `metadata` - 视频元数据
-    /// * `artwork` - 本地图集相对文件名（poster/fanart/thumb），缺项不写
     ///
     /// # 返回
     /// * `Result<Vec<u8>, String>` - 带 UTF-8 BOM 的 XML 内容，或错误信息
-    pub fn generate(
-        &self,
-        metadata: &ScrapeMetadata,
-        artwork: &NfoArtwork,
-    ) -> Result<Vec<u8>, String> {
+    pub fn generate(&self, metadata: &ScrapeMetadata) -> Result<Vec<u8>, String> {
         let mut writer = Writer::new_with_indent(Cursor::new(Vec::new()), b' ', 2);
 
         // 写入 XML 声明
@@ -180,29 +166,7 @@ impl NfoGenerator {
         self.write_simple_element(&mut writer, "publisher", &publisher)?;
         self.write_simple_element(&mut writer, "label", &label)?;
 
-        // 图集：仅引用同目录本地相对文件名（媒体库按文件名约定发现，本地优先于 URL）。
-        // 预览图走 extrafanart/ 目录，不写入 NFO（对齐 JavSP/MDC）。
-        let poster = artwork.poster.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let fanart = artwork.fanart.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let thumb = artwork.thumb.as_deref().map(str::trim).filter(|s| !s.is_empty());
-
-        if let Some(poster) = poster {
-            self.write_simple_element(&mut writer, "poster", poster)?;
-            self.write_thumb(&mut writer, poster, Some("poster"), None)?;
-        }
-        if let Some(fanart) = fanart {
-            // <fanart><thumb>…</thumb></fanart>（Kodi 标准背景图结构）
-            writer
-                .write_event(Event::Start(BytesStart::new("fanart")))
-                .map_err(|e| format!("写入 fanart 标签失败: {}", e))?;
-            self.write_thumb(&mut writer, fanart, None, None)?;
-            writer
-                .write_event(Event::End(BytesEnd::new("fanart")))
-                .map_err(|e| format!("关闭 fanart 标签失败: {}", e))?;
-        }
-        if let Some(thumb) = thumb {
-            self.write_thumb(&mut writer, thumb, Some("landscape"), None)?;
-        }
+        // 图集不写入 NFO（本地图按文件名约定发现，预览图走 extrafanart/，见类型文档）。
 
         // 写入标签（分类/类型）
         for tag in &metadata.tags {
@@ -239,33 +203,22 @@ impl NfoGenerator {
     /// # 参数
     /// * `metadata` - 视频元数据
     /// * `video_path` - 视频文件路径（NFO 将使用相同文件名但扩展名为 .nfo）
-    /// * `artwork` - 本地图集相对文件名（poster/fanart/thumb）
     ///
     /// # 返回
     /// * `Result<PathBuf, String>` - 保存的 NFO 文件路径，或错误信息
     ///
     /// # 示例
     /// 若 video_path 为 "/videos/ABC-123.mp4"，NFO 将保存为 "/videos/ABC-123.nfo"
-    pub fn save(
-        &self,
-        metadata: &ScrapeMetadata,
-        video_path: &Path,
-        artwork: &NfoArtwork,
-    ) -> Result<PathBuf, String> {
-        self.save_to(metadata, &video_path.with_extension("nfo"), artwork)
+    pub fn save(&self, metadata: &ScrapeMetadata, video_path: &Path) -> Result<PathBuf, String> {
+        self.save_to(metadata, &video_path.with_extension("nfo"))
     }
 
     /// 保存 NFO 文件到指定的 NFO 文件路径
     ///
     /// 与 [`save`] 的区别在于：调用方完全决定落点（含目录与文件名），
     /// 供「元数据独立目录」模式直接写入 `<root>/<番号 标题>/<番号>.nfo`。
-    pub fn save_to(
-        &self,
-        metadata: &ScrapeMetadata,
-        nfo_path: &Path,
-        artwork: &NfoArtwork,
-    ) -> Result<PathBuf, String> {
-        let content = self.generate(metadata, artwork)?;
+    pub fn save_to(&self, metadata: &ScrapeMetadata, nfo_path: &Path) -> Result<PathBuf, String> {
+        let content = self.generate(metadata)?;
 
         // 确保父目录存在
         if let Some(parent) = nfo_path.parent() {
@@ -352,34 +305,6 @@ impl NfoGenerator {
         Ok(())
     }
 
-    /// 写入 thumb 元素（支持可选的 aspect 和 preview 属性）
-    fn write_thumb(
-        &self,
-        writer: &mut Writer<Cursor<Vec<u8>>>,
-        url: &str,
-        aspect: Option<&str>,
-        preview: Option<&str>,
-    ) -> Result<(), String> {
-        let mut elem = BytesStart::new("thumb");
-
-        if let Some(aspect_val) = aspect {
-            elem.push_attribute(("aspect", aspect_val));
-        }
-        if let Some(preview_val) = preview {
-            elem.push_attribute(("preview", preview_val));
-        }
-
-        writer
-            .write_event(Event::Start(elem))
-            .map_err(|e| format!("写入 thumb 标签失败: {}", e))?;
-        writer
-            .write_event(Event::Text(BytesText::new(url)))
-            .map_err(|e| format!("写入 thumb 内容失败: {}", e))?;
-        writer
-            .write_event(Event::End(BytesEnd::new("thumb")))
-            .map_err(|e| format!("关闭 thumb 标签失败: {}", e))?;
-        Ok(())
-    }
 }
 
 impl Default for NfoGenerator {
@@ -406,6 +331,7 @@ mod tests {
             duration: Some(120),
             poster_url: "https://example.com/poster.jpg".to_string(),
             cover_url: "https://example.com/cover.jpg".to_string(),
+            cover_candidates: vec![],
             actors: vec!["Actor1".to_string(), "Actor2".to_string()],
             actor_avatars: vec![],
             director: "Test Director".to_string(),
@@ -435,11 +361,7 @@ mod tests {
         let generator = NfoGenerator::new();
         let metadata = create_test_metadata();
 
-        let result = generator.generate(&metadata, &NfoArtwork {
-            poster: Some("ABC-123-poster.jpg".to_string()),
-            fanart: Some("ABC-123-fanart.jpg".to_string()),
-            thumb: Some("ABC-123-thumb.jpg".to_string()),
-        });
+        let result = generator.generate(&metadata);
         assert!(result.is_ok());
 
         let content = result.unwrap();
@@ -468,15 +390,12 @@ mod tests {
         assert!(xml_str.contains("<genre>Genre1</genre>"));
         assert!(xml_str.contains("<name>Actor1</name>"));
         assert!(xml_str.contains("<name>Actor2</name>"));
-        // 图集仅引用本地相对文件名
-        assert!(xml_str.contains("<poster>ABC-123-poster.jpg</poster>"));
-        assert!(xml_str.contains("<thumb aspect=\"poster\">ABC-123-poster.jpg</thumb>"));
-        assert!(xml_str.contains("<fanart>"));
-        assert!(xml_str.contains("<thumb>ABC-123-fanart.jpg</thumb>"));
-        assert!(xml_str.contains("</fanart>"));
-        assert!(xml_str.contains("<thumb aspect=\"landscape\">ABC-123-thumb.jpg</thumb>"));
         assert!(xml_str.contains("<website>https://example.com/detail/ABC-123</website>"));
-        // 不再写远程封面 URL / 预览 thumb（对齐主流，预览走 extrafanart/）
+        // 图集一律不写入 NFO：本地图按文件名约定发现，相对文件名会被 Jellyfin 判为无效 URI；
+        // 远程封面 URL / 预览 thumb 也不写（预览走 extrafanart/）
+        assert!(!xml_str.contains("<poster>"));
+        assert!(!xml_str.contains("<thumb"));
+        assert!(!xml_str.contains("<fanart>"));
         assert!(!xml_str.contains("<cover>"));
         assert!(!xml_str.contains("https://example.com/cover.jpg"));
         assert!(!xml_str.contains("https://example.com/fanart1.jpg"));
@@ -498,6 +417,7 @@ mod tests {
             duration: None,
             poster_url: "".to_string(),
             cover_url: "".to_string(),
+            cover_candidates: vec![],
             actors: vec![],
             actor_avatars: vec![],
             director: "".to_string(),
@@ -518,7 +438,7 @@ mod tests {
             website: String::new(),
         };
 
-        let result = generator.generate(&metadata, &NfoArtwork::default());
+        let result = generator.generate(&metadata);
         assert!(result.is_ok());
 
         let content = result.unwrap();
@@ -545,10 +465,7 @@ mod tests {
 
         fs::write(&video_path, b"dummy video content").unwrap();
 
-        let result = generator.save(&metadata, &video_path, &NfoArtwork {
-            poster: Some("poster.jpg".to_string()),
-            ..Default::default()
-        });
+        let result = generator.save(&metadata, &video_path);
         assert!(result.is_ok());
 
         let nfo_path = result.unwrap();
@@ -580,7 +497,7 @@ mod tests {
 
         fs::write(&video_path, b"dummy video content").unwrap();
 
-        let result = generator.save(&metadata, &video_path, &NfoArtwork::default());
+        let result = generator.save(&metadata, &video_path);
         assert!(result.is_ok());
 
         let nfo_path = result.unwrap();
@@ -638,6 +555,7 @@ mod tests {
             duration: None,
             poster_url: "".to_string(),
             cover_url: "".to_string(),
+            cover_candidates: vec![],
             actors: vec!["".to_string(), "  ".to_string(), "ValidActor".to_string()],
             actor_avatars: vec![],
             director: "".to_string(),
@@ -658,7 +576,7 @@ mod tests {
             website: String::new(),
         };
 
-        let result = generator.generate(&metadata, &NfoArtwork::default());
+        let result = generator.generate(&metadata);
         assert!(result.is_ok());
 
         let content = result.unwrap();

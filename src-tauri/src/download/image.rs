@@ -21,17 +21,34 @@ fn default_client() -> Result<HttpClient, String> {
     crate::resource_scrape::fingerprint_client::shared_client()
 }
 
-/// 下载单张图片并保存到指定路径
+/// 校验下载到的字节是可用图片，否则报错、不落盘。
+///
+/// - HTML/404 页、空数据等无法解码 → 无效（否则会存成打不开的假 .jpg）。
+/// - **AVIF 明确拒绝**：`image` crate 无 AVIF 解码器（裁不出竖版海报、生成不了网格缩略图），
+///   Jellyfin 的 Skia 同样不支持；jav.place 等站点的封面 CDN 只回 AVIF，
+///   此前被原样写成 `.jpg`，媒体库里表现为整片无海报。拒绝后由调用方换下一个候选源。
+fn ensure_supported_image(bytes: &[u8], source: &str) -> Result<(), String> {
+    let short = &source[..source.len().min(100)];
+    if bytes.is_empty() {
+        return Err(format!("下载的数据为空: {}", short));
+    }
+    if matches!(image::guess_format(bytes), Ok(image::ImageFormat::Avif)) {
+        return Err(format!("图片为 AVIF 格式，无法解码，已跳过: {}", short));
+    }
+    if !crate::media::artwork::is_valid_image_bytes(bytes, 0) {
+        return Err(format!("下载内容不是有效图片: {}", short));
+    }
+    Ok(())
+}
+
+/// 下载单张图片并保存到指定路径（下载后先校验为可解码图片，见 [`ensure_supported_image`]）
 pub async fn download_image(
     client: &HttpClient,
     url: &str,
     save_path: &Path,
 ) -> Result<String, String> {
     let bytes = crate::resource_scrape::fingerprint_client::fetch_bytes(client, url).await?;
-
-    if bytes.is_empty() {
-        return Err("下载的数据为空".to_string());
-    }
+    ensure_supported_image(&bytes, url)?;
 
     tokio::fs::write(save_path, &bytes)
         .await
@@ -47,6 +64,7 @@ pub async fn download_image(
 /// - `http(s)://...` — HTTP 下载
 /// - 本地文件路径 — 直接复制（搜索阶段代理缓存的结果）
 ///
+/// 三种来源都先校验为可解码图片（AVIF 视为不可用），不合格返回错误、不落盘。
 /// 空 URL 返回空串（视为无图，非错误）。
 pub async fn save_image_url_to(
     url: &str,
@@ -79,8 +97,9 @@ pub async fn save_image_url_to(
     // 处理本地缓存文件路径（搜索阶段代理下载的临时文件）
     let source_path = Path::new(url);
     if source_path.exists() {
-        std::fs::copy(source_path, save_path)
-            .map_err(|e| format!("复制图片缓存文件失败: {}", e))?;
+        let bytes = std::fs::read(source_path).map_err(|e| format!("读取图片缓存文件失败: {}", e))?;
+        ensure_supported_image(&bytes, url)?;
+        std::fs::write(save_path, &bytes).map_err(|e| format!("复制图片缓存文件失败: {}", e))?;
         return Ok(save_path.to_string_lossy().to_string());
     }
 
@@ -99,10 +118,7 @@ fn save_data_url_to_file(data_url: &str, save_path: &Path) -> Result<String, Str
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(base64_data)
         .map_err(|e| format!("base64 解码失败: {}", e))?;
-
-    if bytes.is_empty() {
-        return Err("解码后的数据为空".to_string());
-    }
+    ensure_supported_image(&bytes, "data:…")?;
 
     let mut file =
         std::fs::File::create(save_path).map_err(|e| format!("创建文件失败: {}", e))?;
@@ -202,8 +218,9 @@ mod tests {
     #[tokio::test]
     async fn test_save_image_url_to_local_copy() {
         let dir = std::env::temp_dir();
-        let src = dir.join(format!("javm-img-src-{}.bin", std::process::id()));
-        std::fs::write(&src, b"fake image bytes").unwrap();
+        let src = dir.join(format!("javm-img-src-{}.png", std::process::id()));
+        // 真实可解码的图片才允许落盘
+        image::RgbImage::from_pixel(4, 4, image::Rgb([1, 2, 3])).save(&src).unwrap();
         let dst = dir.join(format!("javm-img-dst-{}.jpg", std::process::id()));
 
         let result = save_image_url_to(&src.to_string_lossy(), &dst, None).await;
@@ -212,6 +229,31 @@ mod tests {
 
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_file(&dst);
+    }
+
+    #[tokio::test]
+    async fn test_save_image_url_to_rejects_non_image_and_avif() {
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        // 非图片内容（防盗链常回的 HTML）
+        let html = dir.join(format!("javm-img-html-{}.bin", pid));
+        std::fs::write(&html, b"<html>403</html>").unwrap();
+        let dst = dir.join(format!("javm-img-reject-{}.jpg", pid));
+        let err = save_image_url_to(&html.to_string_lossy(), &dst, None).await.unwrap_err();
+        assert!(err.contains("不是有效图片"), "{}", err);
+        assert!(!dst.exists(), "无效图片不应落盘");
+
+        // AVIF 文件头（ftypavif）：无解码器，且 Jellyfin 也不支持，须拒绝而非存成假 jpg
+        let avif = dir.join(format!("javm-img-avif-{}.bin", pid));
+        let mut bytes = b"\0\0\0\x20ftypavif\0\0\0\0avifmif1miafMA1B".to_vec();
+        bytes.extend_from_slice(&[0u8; 64]);
+        std::fs::write(&avif, &bytes).unwrap();
+        let err = save_image_url_to(&avif.to_string_lossy(), &dst, None).await.unwrap_err();
+        assert!(err.contains("AVIF"), "{}", err);
+        assert!(!dst.exists());
+
+        let _ = std::fs::remove_file(&html);
+        let _ = std::fs::remove_file(&avif);
     }
 
     #[tokio::test]

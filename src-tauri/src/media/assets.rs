@@ -57,31 +57,13 @@ pub fn save_nfo_for_video(video_path: &str, metadata: &ScrapeMetadata) -> Result
     save_nfo_to(parent_dir, &file_stem, metadata)
 }
 
-/// 将 NFO 保存到指定目录，文件名为 `<stem>.nfo`；按同目录已存在的标准图集文件
-/// （`<stem>-poster/fanart/thumb.*`）引用相对文件名。
+/// 将 NFO 保存到指定目录，文件名为 `<stem>.nfo`。
 ///
+/// 图集不写入 NFO（媒体库按同目录 `<stem>-poster/fanart/thumb.*` 文件名约定发现）。
 /// 供独立目录模式直接写入 `<root>/<番号 标题>/<番号>.nfo`。
 pub fn save_nfo_to(dir: &Path, stem: &str, metadata: &ScrapeMetadata) -> Result<(), String> {
-    let generator = NfoGenerator::new();
-    let artwork = detect_local_artwork(dir, stem);
     let nfo_path = dir.join(format!("{}.nfo", stem));
-    generator.save_to(metadata, &nfo_path, &artwork).map(|_| ())
-}
-
-/// 探测同目录已存在的标准图集文件，返回 NFO 引用的相对文件名（poster/fanart/thumb）。
-pub fn detect_local_artwork(dir: &Path, stem: &str) -> crate::nfo::generator::NfoArtwork {
-    crate::nfo::generator::NfoArtwork {
-        poster: detect_artwork_filename(dir, stem, crate::media::artwork::POSTER_SUFFIX),
-        fanart: detect_artwork_filename(dir, stem, crate::media::artwork::FANART_SUFFIX),
-        thumb: detect_artwork_filename(dir, stem, crate::media::artwork::THUMB_SUFFIX),
-    }
-}
-
-fn detect_artwork_filename(dir: &Path, stem: &str, suffix: &str) -> Option<String> {
-    ["jpg", "jpeg", "png", "webp"]
-        .iter()
-        .map(|ext| format!("{}-{}.{}", stem, suffix, ext))
-        .find(|name| dir.join(name).exists())
+    NfoGenerator::new().save_to(metadata, &nfo_path).map(|_| ())
 }
 
 pub fn has_same_named_parent_dir(video_path: &Path) -> bool {
@@ -708,6 +690,118 @@ fn stack_group_dir_name(file_stem: &str) -> Option<String> {
     )
 }
 
+/// 把同目录里同一分段组的各段改成媒体库通用的堆叠命名 `<基名>-cd<N>`
+/// （Jellyfin / Emby / Kodi / Plex 只认 `-cd1` / `-part1` 这类「分隔符 + 单位词 + 序号」，
+/// 本应用早期产出的 `X-1.mp4` / `XPart01.mp4` 在它们那里各段会被当成独立影片）。
+/// 每段的 NFO / 图集（含网格缩略图）/ 字幕按同 stem 前缀一并改名。
+///
+/// 返回实际改动的 `(原路径, 新路径)`（含当前段，若它本身需要改）。非分段、或各段已是规范写法时
+/// 返回空列表。目标名已被占用的段跳过并记日志，不中断其余段。
+pub fn normalize_stack_part_names(video_path: &str) -> Result<Vec<(String, String)>, String> {
+    use crate::scanner::file_scanner::is_video_file;
+    use crate::utils::designation_recognizer::{
+        canonical_stack_stem, is_canonical_stack_stem, parse_stack_part,
+    };
+
+    let video = Path::new(video_path);
+    let stem = video
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or("无效的视频文件名")?;
+    let Some((base_key, _)) = parse_stack_part(stem) else {
+        return Ok(Vec::new());
+    };
+    // 基名沿用原文件名大小写（parse 结果是大写归一），改出来的名字与原文件风格一致
+    let base = stack_group_dir_name(stem).unwrap_or_else(|| base_key.clone());
+    let dir = video.parent().ok_or("无效的视频路径")?;
+
+    let candidates: Vec<PathBuf> = fs::read_dir(dir)
+        .map_err(|e| format!("读取目录失败 {}: {}", dir.display(), e))?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && is_video_file(path))
+        .collect();
+
+    let mut moved = Vec::new();
+    for candidate in candidates {
+        let Some(cstem) = candidate.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some((cbase, idx)) = parse_stack_part(cstem) else {
+            continue;
+        };
+        if !cbase.eq_ignore_ascii_case(&base_key) || is_canonical_stack_stem(cstem, &base, idx) {
+            continue;
+        }
+        let new_stem = canonical_stack_stem(&base, idx);
+        let new_name = match candidate.extension().and_then(|e| e.to_str()) {
+            Some(ext) if !ext.is_empty() => format!("{}.{}", new_stem, ext),
+            _ => new_stem.clone(),
+        };
+        let target = dir.join(&new_name);
+        if target.exists() {
+            log::warn!(
+                "[media_assets] event=stack_rename_skipped_target_exists source={} target={}",
+                candidate.display(),
+                target.display()
+            );
+            continue;
+        }
+        move_file(&candidate, &target).map_err(|e| {
+            format!("分段改名失败 {} -> {}: {}", candidate.display(), target.display(), e)
+        })?;
+        rename_stem_companions(dir, cstem, &new_stem);
+        log::info!(
+            "[media_assets] event=stack_part_renamed source={} target={}",
+            candidate.display(),
+            target.display()
+        );
+        moved.push((
+            candidate.to_string_lossy().to_string(),
+            target.to_string_lossy().to_string(),
+        ));
+    }
+    Ok(moved)
+}
+
+/// 把 `<old_stem>.nfo` / `<old_stem>-poster.jpg` / `<old_stem>.zh.srt` 等伴生文件改成新 stem。
+/// 只认「旧 stem + `.` 或 `-`」开头的非视频文件，`X-1` 不会误吃 `X-10-poster.jpg`。
+fn rename_stem_companions(dir: &Path, old_stem: &str, new_stem: &str) {
+    use crate::scanner::file_scanner::is_video_file;
+
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || is_video_file(&path) {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.is_char_boundary(old_stem.len()) {
+            continue;
+        }
+        let (head, rest) = name.split_at(old_stem.len());
+        if !head.eq_ignore_ascii_case(old_stem) || !(rest.starts_with('.') || rest.starts_with('-')) {
+            continue;
+        }
+        let target = dir.join(format!("{}{}", new_stem, rest));
+        if target.exists() {
+            continue;
+        }
+        if let Err(error) = move_file(&path, &target) {
+            log::error!(
+                "[media_assets] event=stack_companion_rename_failed source={} target={} error={}",
+                path.display(),
+                target.display(),
+                error
+            );
+        }
+    }
+}
+
 /// 把同目录里属于同一分段组的其它段（连同各自的 NFO / 图集 / 字幕）搬进组目录，
 /// 返回搬动的段（原路径 → 新路径）。单个段搬不动只记日志跳过，不中断主流程。
 fn move_stack_siblings(
@@ -1267,6 +1361,65 @@ mod tests {
             .expect("不应报错");
         assert!(result.is_none());
         assert!(path.exists());
+    }
+
+    #[test]
+    fn normalize_stack_part_names_renames_group_to_cd_convention() {
+        // 用户实际布局：X-1/X-2/X-3 + 第 1 段的 NFO/图集/字幕，另有一张不相关的旧 NFO
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let root = dir.path();
+        for name in [
+            "IPVR-050-1.mp4",
+            "IPVR-050-2.mp4",
+            "IPVR-050-3.mp4",
+            "IPVR-050-1.nfo",
+            "IPVR-050-1-poster.jpg",
+            "IPVR-050-1-fanart.jpg",
+            "IPVR-050-1-thumbsm.jpg",
+            "IPVR-050-1.zh.srt",
+            "IPVR-050 1.nfo",
+            "IPVR-051-1.mp4",
+        ] {
+            fs::write(root.join(name), b"x").unwrap();
+        }
+
+        let moved = normalize_stack_part_names(root.join("IPVR-050-2.mp4").to_str().unwrap()).unwrap();
+        let mut names: Vec<String> = moved
+            .iter()
+            .map(|(_, n)| Path::new(n).file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["IPVR-050-cd1.mp4", "IPVR-050-cd2.mp4", "IPVR-050-cd3.mp4"]);
+        // 伴生文件随第 1 段改名，旧名不再存在
+        for name in ["IPVR-050-cd1.nfo", "IPVR-050-cd1-poster.jpg", "IPVR-050-cd1-fanart.jpg", "IPVR-050-cd1-thumbsm.jpg", "IPVR-050-cd1.zh.srt"] {
+            assert!(root.join(name).exists(), "{} 应存在", name);
+        }
+        assert!(!root.join("IPVR-050-1.nfo").exists());
+        assert!(!root.join("IPVR-050-1.mp4").exists());
+        // 无关文件与别的番号不动
+        assert!(root.join("IPVR-050 1.nfo").exists());
+        assert!(root.join("IPVR-051-1.mp4").exists());
+
+        // 已规范：再次调用无改动
+        assert!(normalize_stack_part_names(root.join("IPVR-050-cd1.mp4").to_str().unwrap()).unwrap().is_empty());
+        // 非分段：无改动
+        fs::write(root.join("SSIS-001.mp4"), b"x").unwrap();
+        assert!(normalize_stack_part_names(root.join("SSIS-001.mp4").to_str().unwrap()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn normalize_stack_part_names_handles_part_words_and_case() {
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let root = dir.path();
+        for name in ["fc2-ppv-2448481Part01.mp4", "fc2-ppv-2448481Part02.mp4", "fc2-ppv-2448481Part01-poster.jpg"] {
+            fs::write(root.join(name), b"x").unwrap();
+        }
+        let moved = normalize_stack_part_names(root.join("fc2-ppv-2448481Part01.mp4").to_str().unwrap()).unwrap();
+        assert_eq!(moved.len(), 2);
+        // 基名保留原大小写
+        assert!(root.join("fc2-ppv-2448481-cd1.mp4").exists());
+        assert!(root.join("fc2-ppv-2448481-cd2.mp4").exists());
+        assert!(root.join("fc2-ppv-2448481-cd1-poster.jpg").exists());
     }
 
     #[test]

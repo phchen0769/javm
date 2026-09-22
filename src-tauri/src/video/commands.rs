@@ -1381,15 +1381,19 @@ pub struct LibraryHealth {
     pub missing_nfo: i64,
     /// 缺番号（local_id 空，无法刮削/取图）
     pub missing_code: i64,
+    /// 封面无法解码（有 fanart 但读不出尺寸：几乎都是被存成 .jpg 的 AVIF，本应用与 Jellyfin 都打不开）
+    pub unsupported_cover: i64,
+    /// 分段命名不规范（`X-1` / `XPart01` 等，媒体库不会合并成多段影片；规范写法为 `X-cd1`）
+    pub nonstandard_stack: i64,
 }
 
-/// 聚合媒体库的元数据缺口与失败项计数（库健康诊断总览）。
+/// 聚合媒体库的元数据缺口与失败项计数（库健康诊断总览）。纯查库，不访问文件系统。
 #[tauri::command]
 pub async fn get_library_health(db: State<'_, crate::db::Database>) -> AppResult<LibraryHealth> {
     let db = db.inner().clone();
     tokio::task::spawn_blocking(move || -> AppResult<LibraryHealth> {
         let conn = db.get_connection()?;
-        let health = conn.query_row(
+        let mut health = conn.query_row(
             "SELECT
                 COUNT(*),
                 SUM(CASE WHEN scan_status = 3 THEN 1 ELSE 0 END),
@@ -1398,7 +1402,8 @@ pub async fn get_library_health(db: State<'_, crate::db::Database>) -> AppResult
                           AND (thumb IS NULL OR thumb = '')
                           AND (fanart IS NULL OR fanart = '') THEN 1 ELSE 0 END),
                 SUM(CASE WHEN nfo_mtime IS NULL THEN 1 ELSE 0 END),
-                SUM(CASE WHEN local_id IS NULL OR local_id = '' THEN 1 ELSE 0 END)
+                SUM(CASE WHEN local_id IS NULL OR local_id = '' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN fanart IS NOT NULL AND fanart <> '' AND cover_width IS NULL THEN 1 ELSE 0 END)
              FROM videos",
             [],
             |row| {
@@ -1409,10 +1414,85 @@ pub async fn get_library_health(db: State<'_, crate::db::Database>) -> AppResult
                     missing_cover: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
                     missing_nfo: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
                     missing_code: row.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                    unsupported_cover: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                    nonstandard_stack: 0,
                 })
             },
         )?;
+        health.nonstandard_stack = count_nonstandard_stack_parts(&conn)? as i64;
         Ok(health)
+    })
+    .await
+    .map_err(|e| AppError::TaskJoin(e.to_string()))?
+}
+
+/// 库内分段影片里文件名不是规范 `<基名>-cd<N>` 写法的段数（纯按库列计算，不访问文件系统）。
+fn count_nonstandard_stack_parts(conn: &rusqlite::Connection) -> AppResult<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT video_path, stack_key, part_index FROM videos WHERE stack_key IS NOT NULL AND stack_key <> ''",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<i64>>(2)?))
+    })?;
+    let mut count = 0usize;
+    for row in rows {
+        let (path, key, idx) = row?;
+        let stem = Path::new(&path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if !crate::utils::designation_recognizer::is_canonical_stack_stem(&stem, &key, idx.unwrap_or(0)) {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// 一次性整理：把库内所有分段影片改成媒体库通用的 `<基名>-cd<N>` 命名（NFO/图集/字幕随之改名），
+/// 并同步库内路径。已规范的组无改动。返回实际改名的文件数。
+#[tauri::command]
+pub async fn normalize_stack_filenames(
+    app: AppHandle,
+    db: State<'_, crate::db::Database>,
+) -> AppResult<u32> {
+    let settings = crate::settings::get_settings(app.clone()).await.unwrap_or_default();
+    let cfg = crate::media::storage::MetadataStorageConfig::from_settings(&settings);
+    let db = db.inner().clone();
+    tokio::task::spawn_blocking(move || -> AppResult<u32> {
+        let conn = db.get_connection()?;
+        let paths: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT video_path FROM videos WHERE stack_key IS NOT NULL AND stack_key <> '' ORDER BY video_path",
+            )?;
+            let iter = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            let mut list = Vec::new();
+            for item in iter {
+                list.push(item?);
+            }
+            list
+        };
+
+        let mut renamed = 0u32;
+        // 同组各段在同一目录时，处理第一段就会把整组改完；后续段的旧路径已不存在，函数会自然返回空
+        for path in paths {
+            if !Path::new(&path).exists() {
+                continue;
+            }
+            match crate::media::assets::normalize_stack_part_names(&path) {
+                Ok(moved) if !moved.is_empty() => {
+                    super::service::apply_stack_renames_to_db(&conn, &cfg, &moved)
+                        .map_err(AppError::Business)?;
+                    renamed += moved.len() as u32;
+                }
+                Ok(_) => {}
+                Err(e) => log::error!(
+                    "[stack_rename] event=normalize_failed path={} error={}",
+                    path, e
+                ),
+            }
+        }
+        log::info!("[stack_rename] event=normalize_completed renamed={}", renamed);
+        Ok(renamed)
     })
     .await
     .map_err(|e| AppError::TaskJoin(e.to_string()))?

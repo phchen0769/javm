@@ -157,6 +157,15 @@ impl Database {
         Ok(())
     }
 
+    /// 作废网格缩略图（封面文件被改名/替换后旧缩略图路径失效，交由回填重新生成）
+    pub fn clear_cover_thumb(conn: &Connection, video_id: &str) -> Result<()> {
+        conn.execute(
+            "UPDATE videos SET cover_thumb = NULL WHERE id = ?",
+            params![video_id],
+        )?;
+        Ok(())
+    }
+
     /// 分段影片随组搬进组目录后，同步同组其它段的库内路径（按原路径定位，`moved` 为原路径 → 新路径）。
     /// 图集路径原在该段所在目录下的一并改写到新目录（图随段搬走了）；尚未入库的段跳过，等下次扫描按新位置入库。
     pub fn update_stack_sibling_locations(

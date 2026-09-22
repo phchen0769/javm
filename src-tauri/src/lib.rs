@@ -361,6 +361,7 @@ pub fn run() {
             video::commands::find_ad_videos,
             video::commands::delete_videos,
             video::commands::get_library_health,
+            video::commands::normalize_stack_filenames,
             video::commands::download_remote_image,
             video::commands::get_directories,
             video::commands::add_directory,
@@ -379,6 +380,7 @@ pub fn run() {
             media::commands::get_image_candidates,
             media::commands::apply_image_candidates,
             media::commands::batch_fetch_covers,
+            media::commands::batch_refetch_unsupported_covers,
             // 扫描
             scanner::commands::scan_directory,
             // 设置
