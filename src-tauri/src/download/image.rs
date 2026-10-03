@@ -41,6 +41,44 @@ fn ensure_supported_image(bytes: &[u8], source: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 生成同目录下的临时文件路径：先写临时文件、成功后再 rename 覆盖目标。
+/// 这样网络盘（SMB）写入中途失败时，不会把已有封面截断成 0 字节。
+fn tmp_path_for(path: &Path) -> std::path::PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!(".{}.{}.tmp", name, std::process::id()))
+}
+
+/// 原子写（同步）：先写临时文件，成功后再 rename 覆盖目标；失败清理临时文件、保留原文件。
+fn write_file_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = tmp_path_for(path);
+    if let Err(e) = std::fs::write(&tmp, bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// 原子写（异步）：同 [`write_file_atomically`]，用于异步下载路径。
+async fn write_file_atomically_async(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = tmp_path_for(path);
+    if let Err(e) = tokio::fs::write(&tmp, bytes).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, path).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// 下载单张图片并保存到指定路径（下载后先校验为可解码图片，见 [`ensure_supported_image`]）
 pub async fn download_image(
     client: &HttpClient,
@@ -50,7 +88,7 @@ pub async fn download_image(
     let bytes = crate::resource_scrape::fingerprint_client::fetch_bytes(client, url).await?;
     ensure_supported_image(&bytes, url)?;
 
-    tokio::fs::write(save_path, &bytes)
+    write_file_atomically_async(save_path, &bytes)
         .await
         .map_err(|e| format!("写入文件失败: {}", e))?;
 
@@ -99,7 +137,7 @@ pub async fn save_image_url_to(
     if source_path.exists() {
         let bytes = std::fs::read(source_path).map_err(|e| format!("读取图片缓存文件失败: {}", e))?;
         ensure_supported_image(&bytes, url)?;
-        std::fs::write(save_path, &bytes).map_err(|e| format!("复制图片缓存文件失败: {}", e))?;
+        write_file_atomically(save_path, &bytes).map_err(|e| format!("复制图片缓存文件失败: {}", e))?;
         return Ok(save_path.to_string_lossy().to_string());
     }
 
@@ -120,11 +158,7 @@ fn save_data_url_to_file(data_url: &str, save_path: &Path) -> Result<String, Str
         .map_err(|e| format!("base64 解码失败: {}", e))?;
     ensure_supported_image(&bytes, "data:…")?;
 
-    let mut file =
-        std::fs::File::create(save_path).map_err(|e| format!("创建文件失败: {}", e))?;
-
-    std::io::Write::write_all(&mut file, &bytes)
-        .map_err(|e| format!("写入文件失败: {}", e))?;
+    write_file_atomically(save_path, &bytes).map_err(|e| format!("写入文件失败: {}", e))?;
 
     Ok(save_path.to_string_lossy().to_string())
 }
