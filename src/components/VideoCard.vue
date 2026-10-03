@@ -1,14 +1,29 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Clock, Monitor, Film, Star } from 'lucide-vue-next'
+import { Clock, Play, Monitor, Folder, Trash2, Search, Film, Info, FolderInput, Star } from 'lucide-vue-next'
 import { Badge } from '@/components/ui/badge'
-import type { Video } from '@/types'
+import type { Video, Directory } from '@/types'
 import { SCAN_STATUS_TEXT, SCAN_STATUS_VARIANT } from '@/utils/constants'
 import { formatDuration, formatRating } from '@/utils/format'
 import { useVideoStore } from '@/stores'
 import { useSettingsStore } from '@/stores/settings'
 import { toImageSrc, resolveCoverCandidates, hasCoverImage, galleryCoverRatio } from '@/utils/image'
 import { COVER_LAYOUTS, WATERFALL_NO_COVER_WIDTH } from '@/utils/constants'
+import {
+  openInExplorer,
+  moveVideoFile,
+} from '@/lib/tauri'
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu'
+import DeleteVideoDialog from './DeleteVideoDialog.vue'
 
 interface Props {
   video: Video
@@ -31,6 +46,7 @@ const videoStore = useVideoStore()
 const settingsStore = useSettingsStore()
 // 加载失败的封面路径：后端不再探测封面是否存在，失败时顺着候选顺序回退到下一张
 const failedCoverPaths = ref<string[]>([])
+const showDeleteDialog = ref(false)
 
 // 封面布局（横屏/竖屏）随设置变化
 const coverLayout = computed(() =>
@@ -135,6 +151,32 @@ const handleCoverClick = (e: MouseEvent) => {
   handleClick()
 }
 
+// 打开目录
+const handleOpenDir = async () => {
+  await openInExplorer(props.video.videoPath)
+}
+
+// 刮削
+const handleScrape = async () => {
+  emit('scrape', props.video)
+}
+
+// 删除文件
+const handleDelete = () => {
+  showDeleteDialog.value = true
+}
+
+// 移动到目录
+const handleMove = async (dir: Directory) => {
+  try {
+    await moveVideoFile(props.video.id, dir.path)
+    videoStore.removeVideo(props.video.id)
+  } catch (e) {
+    console.error('Failed to move video:', e)
+    alert('移动失败: ' + e)
+  }
+}
+
 const onImgError = () => {
   const failed = currentCoverPath.value
   if (failed && !failedCoverPaths.value.includes(failed)) {
@@ -144,10 +186,12 @@ const onImgError = () => {
 </script>
 
 <template>
-  <div
-    class="video-card group relative overflow-hidden rounded-lg bg-card border shadow-sm hover:shadow-lg transition-all duration-300 cursor-pointer shrink-0"
-    :style="cardStyle"
-    @click="handleClick">
+  <ContextMenu>
+    <ContextMenuTrigger as-child>
+      <div
+        class="video-card group relative overflow-hidden rounded-lg bg-card border shadow-sm hover:shadow-lg transition-all duration-300 cursor-pointer shrink-0"
+        :style="cardStyle"
+        @click="handleClick">
 
         <!-- 封面图 / 占位图 -->
         <div class="overflow-hidden bg-muted flex items-center justify-center relative"
@@ -221,7 +265,62 @@ const onImgError = () => {
             共 {{ video.partCount }} 段
           </Badge>
         </div>
-  </div>
+      </div>
+    </ContextMenuTrigger>
+
+    <ContextMenuContent class="w-48">
+      <ContextMenuItem @select="handlePlay">
+        <Play class="mr-2 size-4" />
+        播放视频
+      </ContextMenuItem>
+      <ContextMenuItem @select="handleClick">
+        <Info class="mr-2 size-4" />
+        查看详情
+      </ContextMenuItem>
+      <ContextMenuItem @select="handleOpenDir">
+        <Folder class="mr-2 size-4" />
+        打开目录
+      </ContextMenuItem>
+
+      <ContextMenuSeparator />
+
+      <ContextMenuItem @select="handleScrape">
+        <Search class="mr-2 size-4" />
+        刮削数据
+      </ContextMenuItem>
+
+      <ContextMenuSeparator />
+
+      <ContextMenuSub>
+        <ContextMenuSubTrigger>
+          <FolderInput class="mr-2 size-4" />
+          移动到目录...
+        </ContextMenuSubTrigger>
+        <ContextMenuSubContent class="max-w-[400px] min-w-[200px] w-auto">
+          <ContextMenuItem v-for="dir in videoStore.directories" :key="dir.id" @select="handleMove(dir)">
+            <Folder class="mr-2 size-4 shrink-0" />
+            <span class="truncate" :title="dir.path">{{ dir.path }}</span>
+          </ContextMenuItem>
+          <ContextMenuItem v-if="videoStore.directories.length === 0" disabled>
+            无可用目录
+          </ContextMenuItem>
+        </ContextMenuSubContent>
+      </ContextMenuSub>
+
+      <ContextMenuSeparator />
+
+      <ContextMenuItem class="text-destructive focus:text-destructive" @select="handleDelete">
+        <Trash2 class="mr-2 size-4" />
+        删除视频
+      </ContextMenuItem>
+    </ContextMenuContent>
+  </ContextMenu>
+
+  <!-- 删除确认对话框 -->
+  <DeleteVideoDialog
+    v-model:open="showDeleteDialog"
+    :video="props.video"
+  />
 </template>
 
 <style scoped>
