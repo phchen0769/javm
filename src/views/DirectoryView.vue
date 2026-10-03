@@ -5,6 +5,7 @@ import { useVideoStore, useResourceScrapeStore } from '@/stores'
 import { selectDirectory, openInExplorer } from '@/lib/tauri'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Switch } from '@/components/ui/switch'
 import {
   Table,
   TableBody,
@@ -98,13 +99,18 @@ const handleAddDirectory = async () => {
   }
 }
 
-// 刷新所有目录
+// 刷新所有目录（仅启用目录；禁用目录扫描器会跳过，不必白白发起）
 const handleRefreshAll = async () => {
   try {
     isRefreshingAll.value = true
     const ids = videoStore.directories
-      .filter(dir => !syncingIds.value.has(dir.id))
+      .filter(dir => dir.enabled !== false && !syncingIds.value.has(dir.id))
       .map(dir => dir.id)
+
+    if (ids.length === 0) {
+      toast.info('没有已启用的目录')
+      return
+    }
 
     for (const id of ids) {
       syncingIds.value.add(id)
@@ -120,6 +126,23 @@ const handleRefreshAll = async () => {
   } finally {
     videoStore.directories.forEach(dir => syncingIds.value.delete(dir.id))
     isRefreshingAll.value = false
+  }
+}
+
+// 启用/禁用目录（禁用后媒体库不再显示该目录的视频）
+const togglingIds = ref<Set<string>>(new Set())
+const handleToggleDirectoryEnabled = async (directory: any, enabled: boolean) => {
+  togglingIds.value.add(directory.id)
+  try {
+    await videoStore.toggleDirectoryEnabled(directory.id, enabled)
+    toast.success(enabled ? '目录已启用' : '目录已禁用', {
+      description: enabled ? undefined : '媒体库不再显示该目录的视频，重新启用可恢复',
+    })
+  } catch (e) {
+    console.error('Failed to toggle directory enabled:', e)
+    toast.error('操作失败')
+  } finally {
+    togglingIds.value.delete(directory.id)
   }
 }
 
@@ -269,22 +292,33 @@ const handleAddToScrapeCenter = async (directory: any) => {
       <Table>
         <TableHeader class="sticky top-0 z-10 bg-background">
           <TableRow class="hover:bg-transparent">
-            <TableHead class="w-[60%]">路径</TableHead>
-            <TableHead class="w-[20%] text-center">视频数量</TableHead>
+            <TableHead class="w-[54%]">路径</TableHead>
+            <TableHead class="w-[13%] text-center">视频数量</TableHead>
+            <TableHead class="w-[13%] text-center">启用</TableHead>
             <TableHead class="w-[20%] text-center">操作</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           <TableRow v-if="videoStore.directories.length === 0" class="hover:bg-transparent">
-            <TableCell colspan="3" class="h-32 text-center text-muted-foreground">
+            <TableCell colspan="4" class="h-32 text-center text-muted-foreground">
               暂无目录，点击"添加目录"按钮开始添加
             </TableCell>
           </TableRow>
           <ContextMenu v-for="directory in videoStore.directories" :key="directory.id">
             <ContextMenuTrigger as-child>
-              <TableRow class="cursor-context-menu">
+              <TableRow class="cursor-context-menu" :class="{ 'opacity-50': directory.enabled === false }">
                 <TableCell class="text-sm truncate max-w-0">{{ directory.path }}</TableCell>
                 <TableCell class="text-center text-sm tabular-nums">{{ directory.videoCount }}</TableCell>
+                <TableCell class="text-center">
+                  <div class="flex items-center justify-center">
+                    <Switch
+                      :model-value="directory.enabled !== false"
+                      :disabled="togglingIds.has(directory.id)"
+                      title="禁用后媒体库不再显示该目录的视频"
+                      @update:model-value="(v) => handleToggleDirectoryEnabled(directory, v)"
+                    />
+                  </div>
+                </TableCell>
                 <TableCell class="text-sm">
                   <div class="flex items-center justify-center gap-1">
                     <Button
@@ -328,7 +362,7 @@ const handleAddToScrapeCenter = async (directory: any) => {
                 打开目录
               </ContextMenuItem>
               <ContextMenuItem
-                :disabled="isSyncing(directory.id)"
+                :disabled="isSyncing(directory.id) || directory.enabled === false"
                 @click="handleSyncDirectory(directory.id)"
               >
                 <RefreshCw
@@ -338,7 +372,7 @@ const handleAddToScrapeCenter = async (directory: any) => {
                 同步数量
               </ContextMenuItem>
               <ContextMenuItem
-                :disabled="isAddingToScrapeCenter(directory.path)"
+                :disabled="isAddingToScrapeCenter(directory.path) || directory.enabled === false"
                 @click="handleAddToScrapeCenter(directory)"
               >
                 <Radar

@@ -437,11 +437,17 @@ impl Database {
                 id TEXT PRIMARY KEY,
                 path TEXT UNIQUE NOT NULL,
                 video_count INTEGER DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )",
             [],
         )?;
+        // 兼容旧库：补目录启用列（0=禁用，禁用后媒体库不显示该目录视频、扫描器跳过该目录）。
+        let _ = conn.execute(
+            "ALTER TABLE directories ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1",
+            [],
+        );
 
         // 索引
         conn.execute(

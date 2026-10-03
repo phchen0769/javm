@@ -13,6 +13,33 @@ pub async fn scan_directory(app: AppHandle, path: String) -> Result<ScanSummary,
     let app_clone = app.clone();
     let app_clone2 = app.clone();
 
+    // 已注册但禁用的目录：跳过扫描（媒体库不展示其视频，扫了也会因库外前缀过滤被清掉）
+    let path_for_check = path.clone();
+    let db_for_check = db.clone();
+    let disabled = tauri::async_runtime::spawn_blocking(move || {
+        db_for_check
+            .get_connection()
+            .ok()
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT enabled FROM directories WHERE path = ?",
+                    [&path_for_check],
+                    |row| row.get::<_, i64>(0),
+                )
+                .ok()
+            })
+            .map(|enabled| enabled == 0)
+            .unwrap_or(false)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    if disabled {
+        return Ok(ScanSummary {
+            success_count: 0,
+            failed_count: 0,
+        });
+    }
+
     // 创建封面截帧任务 channel（扫描过程中实时派发）
     let (cover_tx, cover_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
     let cover_results: Arc<tokio::sync::Mutex<Vec<CoverResult>>> =

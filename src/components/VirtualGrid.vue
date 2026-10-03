@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onActivated, onDeactivated } from 'vue'
+import { ref, computed, watch, nextTick, onActivated, onDeactivated, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import { useElementSize } from '@vueuse/core'
 import VideoCard from './VideoCard.vue'
@@ -10,7 +10,7 @@ import type { ViewMode } from '@/types/settings'
 import { openWithPlayer, openVideoPlayerWindow, openVideoPlaylistWindow } from '@/lib/tauri'
 import { useSettingsStore } from '@/stores/settings'
 import { COVER_LAYOUTS, WATERFALL_ROW_HEIGHT, WATERFALL_NO_COVER_WIDTH } from '@/utils/constants'
-import { hasCoverImage, galleryCoverRatio } from '@/utils/image'
+import { hasCoverImage, galleryCoverRatio, resolveCoverCandidates, toImageSrc } from '@/utils/image'
 import { Button } from '@/components/ui/button'
 
 interface Props {
@@ -27,6 +27,8 @@ const props = withDefaults(defineProps<Props>(), {
 const emit = defineEmits<{
   (e: 'select', video: Video): void
   (e: 'scrape', video: Video): void
+  /** 滚动接近底部（仍有更多可展示的条目）时触发，父组件据此扩大展示窗口（无限加载） */
+  (e: 'loadMore'): void
 }>()
 
 const router = useRouter()
@@ -126,6 +128,22 @@ const rowHeight = computed(() => {
 
 const scrollTop = ref(0)
 const savedScrollTop = ref(0)
+const firstVisibleRow = ref(0)
+let scrollDirection: 1 | -1 = 1
+let lastScrollTop = 0
+
+// 虚拟化的行范围只随「首可见行」变化（跨行时才重建 DOM），而不是随 scrollTop 每像素变化。
+// scrollTop 每像素变化本就不该触发整条 visibleRange→virtualRows 重算链。
+const syncFirstVisibleRow = (currentScrollTop: number) => {
+  const currentRowHeight = rowHeight.value
+  const nextFirstVisibleRow = currentRowHeight > 0 ? Math.floor(currentScrollTop / currentRowHeight) : 0
+  if (nextFirstVisibleRow === firstVisibleRow.value) {
+    return false
+  }
+
+  firstVisibleRow.value = nextFirstVisibleRow
+  return true
+}
 
 // 获取某一行的视频
 const getRowItems = (rowIndex: number): Video[] => {
@@ -150,10 +168,11 @@ const visibleRange = computed(() => {
     return { start: 0, end: 0 }
   }
 
-  const firstVisibleRow = Math.floor(scrollTop.value / currentRowHeight)
   const visibleRowCount = Math.ceil(viewportHeight / currentRowHeight)
-  const start = Math.max(0, firstVisibleRow - OVERSCAN_ROWS)
-  const end = Math.min(itemCount, firstVisibleRow + visibleRowCount + OVERSCAN_ROWS)
+  const backwardRows = scrollDirection === -1 ? 8 : OVERSCAN_ROWS
+  const forwardRows = scrollDirection === 1 ? 8 : OVERSCAN_ROWS
+  const start = Math.max(0, firstVisibleRow.value - backwardRows)
+  const end = Math.min(itemCount, firstVisibleRow.value + visibleRowCount + forwardRows)
 
   return { start, end }
 })
@@ -231,6 +250,63 @@ const handlePlayPart = async (path: string) => {
   }
 }
 
+const preloadedCoverUrls = new Set<string>()
+const preloadImages = new Map<string, HTMLImageElement>()
+const MAX_PRELOADED_COVERS = 80
+let preloadFrame = 0
+
+const getPreloadVideos = () => {
+  const rows: Video[][] = []
+  const rowStart = scrollDirection === 1 ? visibleRange.value.end : Math.max(0, visibleRange.value.start - 6)
+  const rowEnd = scrollDirection === 1 ? Math.min(rowCount.value, visibleRange.value.end + 6) : visibleRange.value.start
+
+  for (let rowIndex = rowStart; rowIndex < rowEnd; rowIndex += 1) {
+    rows.push(getRowItems(rowIndex))
+  }
+
+  return rows.flat()
+}
+
+const preloadNextCovers = () => {
+  if (preloadFrame) {
+    cancelAnimationFrame(preloadFrame)
+  }
+
+  preloadFrame = requestAnimationFrame(() => {
+    preloadFrame = 0
+    for (const video of getPreloadVideos()) {
+      // 预取目标与卡片/列表实际展示一致：优先小缩略图 coverThumb，降低提前解码的开销
+      const candidates = resolveCoverCandidates(video, settingsStore.settings.general.coverType, true)
+      const src = toImageSrc(candidates[0])
+      if (!src || preloadedCoverUrls.has(src)) {
+        continue
+      }
+
+      preloadedCoverUrls.add(src)
+      const image = new Image()
+      image.decoding = 'async'
+      image.src = src
+      preloadImages.set(src, image)
+
+      while (preloadImages.size > MAX_PRELOADED_COVERS) {
+        const oldest = preloadImages.keys().next().value
+        if (!oldest) break
+        preloadImages.delete(oldest)
+        preloadedCoverUrls.delete(oldest)
+      }
+    }
+  })
+}
+
+const clearPreloadedCovers = () => {
+  if (preloadFrame) {
+    cancelAnimationFrame(preloadFrame)
+    preloadFrame = 0
+  }
+  preloadedCoverUrls.clear()
+  preloadImages.clear()
+}
+
 // 恢复滚动并以容器真实 scrollTop 同步虚拟化基准，保证两者一致
 const restoreScrollAndSync = () => {
   const container = containerRef.value
@@ -245,6 +321,8 @@ const restoreScrollAndSync = () => {
   // 关键：scrollTop.value 必须取自容器实际滚动值，否则虚拟化按错误偏移渲染，
   // 行被放到视口之外，表现为切回后空白、需手动滚动才显示
   scrollTop.value = container.scrollTop
+  syncFirstVisibleRow(container.scrollTop)
+  preloadNextCovers()
 }
 
 // KeepAlive 切回时用双 rAF：第一帧等本帧布局（totalHeight 等）落地后恢复滚动，
@@ -259,16 +337,40 @@ const applySavedScrollPosition = () => {
 
 const syncLayout = async () => {
   await nextTick()
-  scrollTop.value = containerRef.value?.scrollTop ?? savedScrollTop.value
+  const currentScrollTop = containerRef.value?.scrollTop ?? savedScrollTop.value
+  scrollTop.value = currentScrollTop
+  syncFirstVisibleRow(currentScrollTop)
+  preloadNextCovers()
 }
 
 const handleScroll = () => {
   const currentScrollTop = containerRef.value?.scrollTop ?? 0
+  if (currentScrollTop > lastScrollTop) {
+    scrollDirection = 1
+  } else if (currentScrollTop < lastScrollTop) {
+    scrollDirection = -1
+  }
+  lastScrollTop = currentScrollTop
   scrollTop.value = currentScrollTop
   savedScrollTop.value = currentScrollTop
+
+  if (syncFirstVisibleRow(currentScrollTop)) {
+    preloadNextCovers()
+  }
+
+  // 无限加载：滚动接近底部且仍有更多条目可展示时，通知父组件扩大展示窗口
+  const currentRowHeight = rowHeight.value
+  const container = containerRef.value
+  if (container && currentRowHeight > 0) {
+    const remaining = container.scrollHeight - container.clientHeight - currentScrollTop
+    if (remaining < currentRowHeight * 4 && props.items.length > 0) {
+      emit('loadMore')
+    }
+  }
 }
 
 watch([() => props.items.length, columns, () => props.viewMode, containerWidth, containerHeight, coverLayout], () => {
+  clearPreloadedCovers()
   void syncLayout()
 })
 
@@ -285,12 +387,17 @@ onDeactivated(() => {
   if (current > 0) {
     savedScrollTop.value = current
   }
+  clearPreloadedCovers()
 })
 
-// 翻页后回到顶部（并清掉记忆的滚动位置，避免 KeepAlive 切回时又跳回旧页的位置）
+onBeforeUnmount(clearPreloadedCovers)
+
+// 回到顶部（并清掉记忆的滚动位置，避免 KeepAlive 切回时又跳回旧位置）
 const scrollToTop = () => {
   savedScrollTop.value = 0
   scrollTop.value = 0
+  firstVisibleRow.value = 0
+  lastScrollTop = 0
   if (containerRef.value) {
     containerRef.value.scrollTop = 0
   }

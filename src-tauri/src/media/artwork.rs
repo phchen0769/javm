@@ -90,8 +90,19 @@ pub fn artwork_path(dir: &Path, stem: &str, suffix: &str) -> PathBuf {
 /// 用于媒体库网格：原图全尺寸在 WebView 里逐张解码是列表卡顿/CPU 打满的主因，
 /// 缩到长边约 480px 后解码开销大幅下降。源本身已足够小时直接复制，避免无谓重编码。
 /// 成功返回缩略图绝对路径，失败返回 None（调用方回退用原图）。
+///
+/// 解码分两级：先走 `image` crate（纯 Rust，JPEG/PNG/无损 WebP 等）；解不了的格式
+/// （AVIF、有损 WebP、HEIC 等）在 macOS 上回退到系统 `sips`（ImageIO）转码。
 pub fn generate_cover_thumbnail(source: &Path, dir: &Path, stem: &str) -> Option<String> {
-    // 按内容猜格式（源可能是命名为 .jpg 的 webp/png），只解码一次
+    let dst = artwork_path(dir, stem, THUMB_SMALL_SUFFIX);
+
+    generate_thumbnail_via_image(source, &dst).or_else(|| generate_thumbnail_via_sips(source, &dst))
+}
+
+/// `image` crate 主路径：按内容猜格式、解码、缩到最长边 [`COVER_THUMB_MAX_EDGE`] 后存 JPEG。
+/// 解不了的格式（AVIF / 有损 WebP 等）返回 None，交由 [`generate_thumbnail_via_sips`] 兜底。
+fn generate_thumbnail_via_image(source: &Path, dst: &Path) -> Option<String> {
+    // 按内容猜格式（源可能是命名为 .jpg 的 webp/png/avif），只解码一次
     let reader = match image::ImageReader::open(source).and_then(|reader| reader.with_guessed_format()) {
         Ok(reader) => reader,
         Err(e) => {
@@ -99,16 +110,11 @@ pub fn generate_cover_thumbnail(source: &Path, dir: &Path, stem: &str) -> Option
             return None;
         }
     };
-    // AVIF：image crate 默认特性只有编码器没有解码器，必定失败；直接跳过（前端回退用原图，
-    // WebView 能正常显示 AVIF），不再每次启动重复报错。
-    if matches!(reader.format(), Some(image::ImageFormat::Avif)) {
-        log::info!("[artwork] event=thumbsm_skipped_avif src={}", source.display());
-        return None;
-    }
     let img = match reader.decode() {
         Ok(img) => img,
         Err(e) => {
-            log::error!("[artwork] event=thumbsm_decode_failed src={} error={}", source.display(), e);
+            // AVIF / 有损 WebP 等 image crate 解不了的格式会走到 sips 兜底，这里不算错误
+            log::info!("[artwork] event=thumbsm_decode_fallback src={} error={}", source.display(), e);
             return None;
         }
     };
@@ -118,7 +124,6 @@ pub fn generate_cover_thumbnail(source: &Path, dir: &Path, stem: &str) -> Option
         return None;
     }
 
-    let dst = artwork_path(dir, stem, THUMB_SMALL_SUFFIX);
     // 长边超过阈值才缩放；resize 保持比例、把图放进 max×max 盒子内
     let out = if width.max(height) > COVER_THUMB_MAX_EDGE {
         img.resize(COVER_THUMB_MAX_EDGE, COVER_THUMB_MAX_EDGE, image::imageops::FilterType::Triangle)
@@ -127,14 +132,63 @@ pub fn generate_cover_thumbnail(source: &Path, dir: &Path, stem: &str) -> Option
     };
 
     // JPEG 不支持 alpha，统一转 RGB8 再保存
-    match out.to_rgb8().save(&dst) {
+    match out.to_rgb8().save(dst) {
         Ok(_) => Some(dst.to_string_lossy().to_string()),
         Err(e) => {
             log::error!("[artwork] event=thumbsm_save_failed dst={} error={}", dst.display(), e);
             // SMB 等网络盘写失败会留下 0 字节文件，清掉以免被当成有效缩略图
-            let _ = std::fs::remove_file(&dst);
+            let _ = std::fs::remove_file(dst);
             None
         }
+    }
+}
+
+/// macOS 兜底：`image` crate 解不了的格式（AVIF、有损 WebP、HEIC 等）用系统 `sips`（ImageIO）
+/// 转成 JPEG 缩略图。`sips` 按文件内容（magic bytes）而非扩展名识别格式，假 `.jpg` 也能正确转码。
+/// 非 macOS 或 sips 失败时返回 None（调用方回退用原图）。
+fn generate_thumbnail_via_sips(source: &Path, dst: &Path) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("sips")
+            .arg("-s").arg("format").arg("jpeg")
+            .arg("-Z").arg(COVER_THUMB_MAX_EDGE.to_string())
+            .arg(source)
+            .arg("--out")
+            .arg(dst)
+            .output();
+
+        match output {
+            Ok(o) if o.status.success() => {
+                // 校验产物确为可读图片，避免把 sips 的失败残留当成有效缩略图
+                if matches!(image::image_dimensions(dst), Ok((w, h)) if w > 0 && h > 0) {
+                    log::info!("[artwork] event=thumbsm_sips_ok src={} dst={}", source.display(), dst.display());
+                    Some(dst.to_string_lossy().to_string())
+                } else {
+                    log::error!("[artwork] event=thumbsm_sips_invalid dst={}", dst.display());
+                    let _ = std::fs::remove_file(dst);
+                    None
+                }
+            }
+            Ok(o) => {
+                log::error!(
+                    "[artwork] event=thumbsm_sips_failed src={} stderr={}",
+                    source.display(),
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
+                let _ = std::fs::remove_file(dst);
+                None
+            }
+            Err(e) => {
+                log::error!("[artwork] event=thumbsm_sips_spawn_failed src={} error={}", source.display(), e);
+                None
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (source, dst);
+        None
     }
 }
 

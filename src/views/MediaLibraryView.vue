@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onActivated, computed, watch, nextTick } from 'vue'
 import { useDebounceFn } from '@vueuse/core'
-import { Search, ArrowUpDown, Filter, X, LayoutGrid, List, RefreshCw, RectangleHorizontal, RectangleVertical, LayoutDashboard, Activity, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-vue-next'
+import { Search, ArrowUpDown, Filter, X, LayoutGrid, List, RefreshCw, RectangleHorizontal, RectangleVertical, LayoutDashboard, Activity } from 'lucide-vue-next'
 import { useVideoStore, useSettingsStore } from '@/stores'
 import { toast } from 'vue-sonner'
 import LibraryHealthDialog from '@/components/LibraryHealthDialog.vue'
@@ -36,6 +36,7 @@ import VirtualGrid from '@/components/VirtualGrid.vue'
 import VideoDetailDialog from '@/components/VideoDetailDialog.vue'
 import ScrapeDialog from '@/components/ScrapeDialog.vue'
 import type { Video, ViewMode, CoverType } from '@/types'
+import { COVER_LAYOUTS } from '@/utils/constants'
 import { backfillCoverDimensions, backfillCoverThumbnails, backfillSubtitleFlags, backfillFileCtimes } from '@/lib/tauri'
 
 const ALL_DIRECTORY_VALUE = '__all__'
@@ -252,35 +253,53 @@ const filteredVideos = computed(() => videoStore.filteredVideos)
 const hasFilteredResults = computed(() => filteredVideos.value.length > 0)
 const isFilteredEmpty = computed(() => !videoStore.loading && !hasFilteredResults.value && videoStore.totalCount > 0)
 
-// 分页：每页 100 个，筛选/排序结果变化时回到第 1 页
-const PAGE_SIZE = 100
-const currentPage = ref(1)
-const totalPages = computed(() => Math.max(1, Math.ceil(filteredVideos.value.length / PAGE_SIZE)))
-const displayVideos = computed(() => {
-  const start = (currentPage.value - 1) * PAGE_SIZE
-  return filteredVideos.value.slice(start, start + PAGE_SIZE)
-})
-const goToPage = (page: number) => {
-  const target = Math.min(Math.max(1, page), totalPages.value)
-  if (target === currentPage.value) return
-  currentPage.value = target
+// 无限加载：滑到接近底部时自动扩大展示窗口，直到显示全部筛选结果。
+// 初始窗口按首屏能容纳的条目数取整行（避免不足一屏时内容区没有滚动条、无法触发加载）。
+const LOAD_STEP = 100
+const rootRef = ref<HTMLElement | null>(null)
+const displayLimit = ref(LOAD_STEP)
+const displayVideos = computed(() => filteredVideos.value.slice(0, displayLimit.value))
+const hasMoreToShow = computed(() => displayLimit.value < filteredVideos.value.length)
+
+// 估算首屏容量（按当前视图模式与容器尺寸的保守估计，取整行后 +1 行余量保证可滚动）
+const initialLimit = () => {
+  const rect = rootRef.value?.getBoundingClientRect()
+  const width = rect?.width || 1200
+  const height = rect?.height || 800
+  if (viewMode.value === 'list') {
+    return Math.ceil(height / 126) + 1
+  }
+  const layout = COVER_LAYOUTS[settingsStore.settings.general.coverType] || COVER_LAYOUTS.landscape
+  const cardWidth = layout.cardWidth
+  const rowHeight = cardWidth * layout.coverAspectRatio + 60 + 16
+  const columns = Math.max(1, Math.floor((width - 16) / (cardWidth + 16)))
+  return (Math.ceil(height / rowHeight) + 1) * columns
+}
+
+const resetDisplayLimit = () => {
+  displayLimit.value = Math.min(filteredVideos.value.length, Math.max(LOAD_STEP, initialLimit()))
   nextTick(() => virtualGridRef.value?.scrollToTop())
 }
-watch(totalPages, (pages) => {
-  if (currentPage.value > pages) currentPage.value = pages
+
+const handleLoadMore = () => {
+  if (!hasMoreToShow.value) return
+  displayLimit.value = Math.min(displayLimit.value + LOAD_STEP, filteredVideos.value.length)
+}
+
+// 筛选/排序变化时回到起始位置并收起展示窗口
+watch(() => videoStore.filter, resetDisplayLimit, { deep: true })
+// 列表数据整体刷新后（如刮削完成），保持当前已展示进度不被重置
+watch(filteredVideos, (list) => {
+  if (displayLimit.value > list.length) {
+    displayLimit.value = Math.max(LOAD_STEP, list.length)
+  }
 })
-watch(() => videoStore.filter, () => {
-  currentPage.value = 1
-  nextTick(() => virtualGridRef.value?.scrollToTop())
-}, { deep: true })
 
 // 视频总数显示
 const videoCount = computed(() => {
   const total = filteredVideos.value.length
-  if (total <= PAGE_SIZE) return `共 ${total} 个视频`
-  const start = (currentPage.value - 1) * PAGE_SIZE + 1
-  const end = Math.min(currentPage.value * PAGE_SIZE, total)
-  return `${start}-${end} / 共 ${total} 个视频`
+  if (!hasMoreToShow.value) return `共 ${total} 个视频`
+  return `已显示 ${displayVideos.value.length} / 共 ${total} 个视频`
 })
 
 // 库健康诊断对话框
@@ -441,7 +460,7 @@ const showNonStandardLibrary = () => {
 </script>
 
 <template>
-  <div class="flex h-full flex-col">
+  <div ref="rootRef" class="flex h-full flex-col">
     <!-- 工具栏 -->
     <div class="flex items-center gap-2 border-b p-4">
       <!-- 搜索框 -->
@@ -731,26 +750,8 @@ const showNonStandardLibrary = () => {
         :view-mode="viewMode"
         @select="handleVideoSelect"
         @scrape="handleScrape"
+        @load-more="handleLoadMore"
       />
-    </div>
-
-    <!-- 分页栏（每页 100 个） -->
-    <div v-if="totalPages > 1" class="flex items-center justify-center gap-2 border-t px-4 py-2">
-      <Button variant="outline" size="sm" class="h-8" :disabled="currentPage <= 1" @click="goToPage(1)">
-        <ChevronsLeft class="size-4" />
-      </Button>
-      <Button variant="outline" size="sm" class="h-8" :disabled="currentPage <= 1" @click="goToPage(currentPage - 1)">
-        <ChevronLeft class="size-4" />
-      </Button>
-      <span class="px-2 text-sm tabular-nums text-muted-foreground">
-        第 {{ currentPage }} / {{ totalPages }} 页
-      </span>
-      <Button variant="outline" size="sm" class="h-8" :disabled="currentPage >= totalPages" @click="goToPage(currentPage + 1)">
-        <ChevronRight class="size-4" />
-      </Button>
-      <Button variant="outline" size="sm" class="h-8" :disabled="currentPage >= totalPages" @click="goToPage(totalPages)">
-        <ChevronsRight class="size-4" />
-      </Button>
     </div>
 
     <!-- 视频详情对话框 -->

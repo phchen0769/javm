@@ -22,18 +22,20 @@ pub async fn get_directories(db: State<'_, crate::db::Database>) -> AppResult<Ve
 
     tokio::task::spawn_blocking(move || {
         let mut stmt = conn
-            .prepare("SELECT id, path, video_count, created_at, updated_at FROM directories ORDER BY created_at DESC")?;
+            .prepare("SELECT id, path, video_count, enabled, created_at, updated_at FROM directories ORDER BY created_at DESC")?;
         let rows = stmt
             .query_map([], |row| {
                 let id: String = row.get(0)?;
                 let path: String = row.get(1)?;
                 let count: i64 = row.get(2)?;
-                let created_at: String = row.get(3)?;
-                let updated_at: String = row.get(4)?;
+                let enabled: i64 = row.get(3)?;
+                let created_at: String = row.get(4)?;
+                let updated_at: String = row.get(5)?;
                 Ok(serde_json::json!({
                     "id": id,
                     "path": path,
                     "videoCount": count,
+                    "enabled": enabled != 0,
                     "createdAt": created_at,
                     "updatedAt": updated_at
                 }))
@@ -44,6 +46,30 @@ pub async fn get_directories(db: State<'_, crate::db::Database>) -> AppResult<Ve
             dirs.push(r?);
         }
         Ok(dirs)
+    })
+    .await
+    .map_err(|e| AppError::TaskJoin(e.to_string()))?
+}
+
+/// 启用/禁用目录。禁用后媒体库不再显示该目录的视频（视频记录保留，重新启用即恢复），
+/// 扫描器也会跳过该目录。
+#[tauri::command]
+pub async fn set_directory_enabled(
+    db: State<'_, crate::db::Database>,
+    id: String,
+    enabled: bool,
+) -> AppResult<()> {
+    let conn = db.get_connection()?;
+
+    tokio::task::spawn_blocking(move || {
+        let affected = conn.execute(
+            "UPDATE directories SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            rusqlite::params![enabled as i64, &id],
+        )?;
+        if affected == 0 {
+            return Err(AppError::Business("目录不存在".to_string()));
+        }
+        Ok(())
     })
     .await
     .map_err(|e| AppError::TaskJoin(e.to_string()))?
@@ -396,9 +422,13 @@ pub async fn get_actors(db: State<'_, crate::db::Database>) -> AppResult<Vec<ser
 /// 回填存量视频的封面尺寸：扫描有 poster 但缺 cover_width/cover_height 的记录，
 /// 仅读图头补算尺寸写回。瀑布流等高画廊布局/虚拟化需要封面比例。
 /// 返回成功补算的数量。
-/// 回填任务的失败重试间隔：失败项 7 天内不再重试，避免每次启动都对同一批无法处理的文件
-/// （AVIF 假 jpg、网络盘写失败）重复跑一遍、拖慢启动。
-const BACKFILL_RETRY_AFTER: &str = "-7 days";
+/// 回填任务的失败重试间隔：失败项 1 天内不再重试。
+///
+/// 7 天太长：网络盘临时离线、或刮削器修复前落盘的假 jpg 这类**暂时性失败**会被整周挡住，
+/// 眼睁睁看着回填「跑完」其实只回填了少数。AVIF 已在 `generate_cover_thumbnail` 里按格式
+/// 快速跳过（不整图解码），不会因缩短间隔而拖慢启动；真正昂贵的失败（网络盘写失败）也只在
+/// 每次挂载时重试一次，且运行在 spawn_blocking 中不占 UI 线程。
+const BACKFILL_RETRY_AFTER: &str = "-1 day";
 
 #[tauri::command]
 pub async fn backfill_cover_dimensions(db: State<'_, crate::db::Database>) -> AppResult<u32> {
@@ -488,14 +518,6 @@ pub async fn backfill_cover_thumbnails(db: State<'_, crate::db::Database>) -> Ap
 
         let mut updated = 0u32;
         for (id, video_path, dir_path, fanart, thumb, poster) in targets {
-            // 与前端选图一致：横版优先（fanart → thumb → poster）
-            let source = fanart
-                .as_deref()
-                .filter(|p| !p.trim().is_empty())
-                .or_else(|| thumb.as_deref().filter(|p| !p.trim().is_empty()))
-                .or_else(|| poster.as_deref().filter(|p| !p.trim().is_empty()));
-            let Some(source) = source else { continue };
-
             let Some(stem) = std::path::Path::new(&video_path)
                 .file_stem()
                 .and_then(|name| name.to_str())
@@ -503,11 +525,37 @@ pub async fn backfill_cover_thumbnails(db: State<'_, crate::db::Database>) -> Ap
                 continue;
             };
 
-            match crate::media::artwork::generate_cover_thumbnail(
-                std::path::Path::new(source),
-                std::path::Path::new(&dir_path),
-                stem,
-            ) {
+            // 与前端选图一致：横版优先（fanart → thumb → poster）。
+            // 依次尝试：跳过不存在/0 字节/非普通文件的源，解码失败（AVIF 无 sips、损坏等）
+            // 也顺延到下一张，避免「fanart 是空文件、同目录 thumb 完好」时白白失败。
+            let mut generated: Option<String> = None;
+            for source in [fanart.as_deref(), thumb.as_deref(), poster.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                let source = source.trim();
+                if source.is_empty() {
+                    continue;
+                }
+                let path = std::path::Path::new(source);
+                // 跳过读不出的源（不存在、0 字节、非普通文件），落到下一张候选
+                if !matches!(std::fs::metadata(path), Ok(m) if m.is_file() && m.len() > 0) {
+                    continue;
+                }
+                match crate::media::artwork::generate_cover_thumbnail(
+                    path,
+                    std::path::Path::new(&dir_path),
+                    stem,
+                ) {
+                    Some(thumb_path) => {
+                        generated = Some(thumb_path);
+                        break;
+                    }
+                    None => continue,
+                }
+            }
+
+            match generated {
                 Some(thumb_path) => {
                     conn.execute(
                         "UPDATE videos SET cover_thumb = ?, cover_thumb_attempted_at = datetime('now') WHERE id = ?",
@@ -516,6 +564,7 @@ pub async fn backfill_cover_thumbnails(db: State<'_, crate::db::Database>) -> Ap
                     updated += 1;
                 }
                 None => {
+                    // 所有候选源都不可用（空文件/损坏/解码失败），记录尝试时间进入冷却
                     conn.execute(
                         "UPDATE videos SET cover_thumb_attempted_at = datetime('now') WHERE id = ?",
                         rusqlite::params![id],

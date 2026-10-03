@@ -49,6 +49,11 @@ export async function deleteDirectory(id: string): Promise<void> {
     return tauriInvoke('delete_directory', { id })
 }
 
+/** 启用/禁用目录（禁用后媒体库不显示该目录视频，视频记录保留） */
+export async function setDirectoryEnabled(id: string, enabled: boolean): Promise<void> {
+    return tauriInvoke('set_directory_enabled', { id, enabled })
+}
+
 /** 鑾峰彇瑙嗛鍒楄〃 */
 export async function getVideos(filter?: VideoFilter): Promise<Video[]> {
     return tauriInvoke<Video[]>('get_videos', { filter })

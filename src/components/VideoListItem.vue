@@ -56,8 +56,9 @@ watch(coverStateKey, () => {
 }, { immediate: true })
 
 // 当前展示的封面路径（按封面方向偏好选图：横屏→fanart，竖屏→poster，带回退；已加载失败的路径跳过）
+// 列表行缩略图同样优先用小缩略图 coverThumb，避免逐行解码全尺寸大图（与卡片模式一致）。
 const currentCoverPath = computed(() => {
-  const candidates = resolveCoverCandidates(props.video, settingsStore.settings.general.coverType)
+  const candidates = resolveCoverCandidates(props.video, settingsStore.settings.general.coverType, true)
   return candidates.find(path => !failedCoverPaths.value.includes(path))
 })
 

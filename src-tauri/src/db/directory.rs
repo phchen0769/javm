@@ -59,9 +59,10 @@ impl Database {
         (normalized, pattern)
     }
 
-    /// 加载所有「目录管理」目录的规范化前缀（统一为 `/` 分隔、去除结尾 `/`）。
+    /// 加载「目录管理」已启用目录的规范化前缀（统一为 `/` 分隔、去除结尾 `/`）。
+    /// 禁用目录不在其内：媒体库列表据此排除其视频，下载完成入库也视为库外路径。
     pub fn managed_directory_prefixes(conn: &Connection) -> Result<Vec<String>> {
-        let mut stmt = conn.prepare("SELECT path FROM directories")?;
+        let mut stmt = conn.prepare("SELECT path FROM directories WHERE enabled = 1")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         Ok(rows
             .filter_map(|r| r.ok())

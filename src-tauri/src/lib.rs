@@ -366,6 +366,7 @@ pub fn run() {
             video::commands::get_directories,
             video::commands::add_directory,
             video::commands::delete_directory,
+            video::commands::set_directory_enabled,
             // 媒体/截图
             media::commands::capture_video_frames,
             media::commands::cancel_capture,

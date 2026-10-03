@@ -460,6 +460,19 @@ export const useVideoStore = defineStore('video', () => {
         }
     }
 
+    async function toggleDirectoryEnabled(id: string, enabled: boolean) {
+        const { setDirectoryEnabled } = await import('@/lib/tauri')
+        await setDirectoryEnabled(id, enabled)
+
+        const directory = directories.value.find(d => d.id === id)
+        if (directory) {
+            directory.enabled = enabled
+        }
+
+        // 禁用后媒体库不再展示该目录视频（后端按启用目录前缀过滤），重新启用则恢复显示
+        await fetchVideos()
+    }
+
     async function syncDirectoryCount(id: string) {
         const directory = directories.value.find(d => d.id === id)
         if (!directory) return
@@ -551,6 +564,7 @@ export const useVideoStore = defineStore('video', () => {
         fetchDirectories,
         addDirectory,
         removeDirectory,
+        toggleDirectoryEnabled,
         syncDirectoryCount,
         syncDirectoryCountBatch,
     }
