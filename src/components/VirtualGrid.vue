@@ -27,8 +27,6 @@ const props = withDefaults(defineProps<Props>(), {
 const emit = defineEmits<{
   (e: 'select', video: Video): void
   (e: 'scrape', video: Video): void
-  /** 滚动接近底部（仍有更多可展示的条目）时触发，父组件据此扩大展示窗口（无限加载） */
-  (e: 'loadMore'): void
 }>()
 
 const router = useRouter()
@@ -356,16 +354,6 @@ const handleScroll = () => {
 
   if (syncFirstVisibleRow(currentScrollTop)) {
     preloadNextCovers()
-  }
-
-  // 无限加载：滚动接近底部且仍有更多条目可展示时，通知父组件扩大展示窗口
-  const currentRowHeight = rowHeight.value
-  const container = containerRef.value
-  if (container && currentRowHeight > 0) {
-    const remaining = container.scrollHeight - container.clientHeight - currentScrollTop
-    if (remaining < currentRowHeight * 4 && props.items.length > 0) {
-      emit('loadMore')
-    }
   }
 }
 
