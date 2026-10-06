@@ -57,6 +57,9 @@ export type PlayMethod = 'system' | 'software'
 /** 封面类型（横屏/竖屏） */
 export type CoverType = 'landscape' | 'portrait'
 
+/** 媒体库浏览模式：infinite=无限滚动（触底自动加载），paged=上下翻页（按钮翻页） */
+export type MediaPagination = 'infinite' | 'paged'
+
 /** 通用设置 */
 export interface GeneralSettings {
     scanPaths: string[]
@@ -68,6 +71,10 @@ export interface GeneralSettings {
     actorCardSize: number
     /** 用户自定义的额外视频扩展名（不含前导点，小写），扫描时与内置列表合并 */
     videoExtensions: string[]
+    /** 媒体库浏览模式（无限滚动 / 上下翻页） */
+    mediaPagination: MediaPagination
+    /** 媒体库每页（每批）显示的资源数量 */
+    mediaPageSize: number
 }
 
 /** 下载源（资源链接视频站） */
@@ -216,6 +223,8 @@ export const defaultSettings: AppSettings = {
         coverType: 'landscape',
         actorCardSize: 160,
         videoExtensions: [],
+        mediaPagination: 'infinite',
+        mediaPageSize: 100,
     },
     download: {
         savePath: '',

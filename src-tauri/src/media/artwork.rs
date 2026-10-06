@@ -18,8 +18,6 @@ pub const POSTER_SUFFIX: &str = "poster";
 pub const FANART_SUFFIX: &str = "fanart";
 /// 横版缩略图后缀
 pub const THUMB_SUFFIX: &str = "thumb";
-/// 网格小缩略图后缀（媒体库网格快速解码用）
-pub const THUMB_SMALL_SUFFIX: &str = "thumbsm";
 
 /// 网格缩略图最长边（像素）。原图动辄 800~1920px，网格卡片实际宽约 200~380px，
 /// 缩到 480px 长边即够清晰，解码开销比全尺寸小一个数量级，是治本卡顿的关键。
@@ -85,18 +83,43 @@ pub fn artwork_path(dir: &Path, stem: &str, suffix: &str) -> PathBuf {
     dir.join(format!("{}-{}.jpg", stem, suffix))
 }
 
-/// 从已有封面源图生成网格小缩略图 `<stem>-thumbsm.jpg`（保持比例，最长边 [`COVER_THUMB_MAX_EDGE`]）。
+/// 网格缩略图缓存文件名摘要：路径 → 16 位十六进制（FNV-1a 64bit）。
+///
+/// 自己实现而非用标准库 `DefaultHasher`：后者的 SipHash 不保证跨 Rust 版本稳定，
+/// 一旦变了全库缩略图会集体失配、整库重建。
+fn path_digest(path: &str) -> String {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET_BASIS;
+    for byte in path.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(PRIME);
+    }
+    format!("{:016x}", hash)
+}
+
+/// 网格缩略图的本地缓存路径：`<cache_dir>/<video_path 摘要>.jpg`。
+///
+/// 刻意**不**放在视频同目录：媒体库多在 SMB/USB 上，网格每翻一页都要对网络盘逐张
+/// 发起文件打开请求，这个往返延迟比解码开销更致命。缓存到本地后列表渲染零网络盘访问。
+/// 按 `video_path` 摘要命名而非番号：路径天然唯一，且一个视频恒定一个缓存文件。
+pub fn cover_thumb_cache_path(cache_dir: &Path, video_path: &str) -> PathBuf {
+    cache_dir.join(format!("{}.jpg", path_digest(video_path)))
+}
+
+/// 从已有封面源图生成网格小缩略图到 `dst`（保持比例，最长边 [`COVER_THUMB_MAX_EDGE`]）。
 ///
 /// 用于媒体库网格：原图全尺寸在 WebView 里逐张解码是列表卡顿/CPU 打满的主因，
-/// 缩到长边约 480px 后解码开销大幅下降。源本身已足够小时直接复制，避免无谓重编码。
+/// 缩到长边约 480px 后解码开销大幅下降。源本身已足够小时不重采样，避免无谓重编码。
 /// 成功返回缩略图绝对路径，失败返回 None（调用方回退用原图）。
+///
+/// `dst` 由 [`cover_thumb_cache_path`] 给出（本地缓存目录），不落在媒体目录里——
+/// 媒体库软件不认 `-thumbsm` 这类后缀，放在视频旁边只是污染网络盘并拖慢列表。
 ///
 /// 解码分两级：先走 `image` crate（纯 Rust，JPEG/PNG/无损 WebP 等）；解不了的格式
 /// （AVIF、有损 WebP、HEIC 等）在 macOS 上回退到系统 `sips`（ImageIO）转码。
-pub fn generate_cover_thumbnail(source: &Path, dir: &Path, stem: &str) -> Option<String> {
-    let dst = artwork_path(dir, stem, THUMB_SMALL_SUFFIX);
-
-    generate_thumbnail_via_image(source, &dst).or_else(|| generate_thumbnail_via_sips(source, &dst))
+pub fn generate_cover_thumbnail(source: &Path, dst: &Path) -> Option<String> {
+    generate_thumbnail_via_image(source, dst).or_else(|| generate_thumbnail_via_sips(source, dst))
 }
 
 /// `image` crate 主路径：按内容猜格式、解码、缩到最长边 [`COVER_THUMB_MAX_EDGE`] 后存 JPEG。

@@ -252,28 +252,89 @@ const filteredVideos = computed(() => videoStore.filteredVideos)
 const hasFilteredResults = computed(() => filteredVideos.value.length > 0)
 const isFilteredEmpty = computed(() => !videoStore.loading && !hasFilteredResults.value && videoStore.totalCount > 0)
 
-// 页码翻页：固定每页条数，替代无限滚动。
-const PAGE_SIZE = 100
+// 浏览模式（无限滚动 / 上下翻页）与每页条数均从设置读取。
+// 两种模式的切片策略不同：
+// - 无限滚动：累积切片（slice(0, currentPage*size)），触底只增不减，已渲染行 key 不变，
+//   VirtualGrid 不重建 DOM/不重新解码封面，滚动流畅。
+// - 上下翻页：替换切片（slice((currentPage-1)*size, ...)），每页独立，跳页后滚回顶部，
+//   让「翻页」有明确的内容切换（这正是传统分页的预期）。
+const paginationMode = computed(() => settingsStore.settings.general.mediaPagination || 'infinite')
+const pageSize = computed(() => settingsStore.settings.general.mediaPageSize || 100)
 const currentPage = ref(1)
-const totalPages = computed(() => Math.max(1, Math.ceil(filteredVideos.value.length / PAGE_SIZE)))
+const totalPages = computed(() => Math.max(1, Math.ceil(filteredVideos.value.length / pageSize.value)))
 const displayVideos = computed(() => {
-  const start = (currentPage.value - 1) * PAGE_SIZE
-  return filteredVideos.value.slice(start, start + PAGE_SIZE)
+  if (paginationMode.value === 'paged') {
+    const start = (currentPage.value - 1) * pageSize.value
+    return filteredVideos.value.slice(start, start + pageSize.value)
+  }
+  return filteredVideos.value.slice(0, currentPage.value * pageSize.value)
 })
 
+// 触底自动加载：仅在无限滚动模式下生效（翻页模式靠按钮，触底不自动加载）
+const loadMore = () => {
+  if (paginationMode.value !== 'infinite') return
+  if (currentPage.value < totalPages.value) {
+    currentPage.value += 1
+  }
+}
+
+// 跳转到指定页（翻页模式）：滚回顶部，展示该页内容
 const goToPage = (page: number) => {
-  currentPage.value = Math.min(Math.max(1, page), totalPages.value)
+  const target = Math.min(Math.max(1, page), totalPages.value)
+  currentPage.value = target
   nextTick(() => virtualGridRef.value?.scrollToTop())
 }
-const nextPage = () => goToPage(currentPage.value + 1)
-const prevPage = () => goToPage(currentPage.value - 1)
+// 下一页
+const nextPage = () => {
+  if (currentPage.value < totalPages.value) {
+    goToPage(currentPage.value + 1)
+  }
+}
+// 上一页
+const prevPage = () => {
+  if (currentPage.value > 1) {
+    goToPage(currentPage.value - 1)
+  }
+}
 
-// 筛选/排序变化时回到第一页
-watch(() => videoStore.filter, () => goToPage(1), { deep: true })
+// 页码输入框（翻页模式）：暂存用户输入，回车/失焦时跳转
+const pageInput = ref('1')
+watch(currentPage, (p) => { pageInput.value = String(p) })
+watch(totalPages, () => { pageInput.value = String(currentPage.value) })
+const commitPageInput = () => {
+  const n = Math.round(Number(pageInput.value))
+  if (!Number.isFinite(n)) {
+    pageInput.value = String(currentPage.value)
+    return
+  }
+  goToPage(n)
+  // 越界输入被 clamp 后同步回显（避免 currentPage 未变时 watch 不触发、输入框残留非法值）
+  pageInput.value = String(currentPage.value)
+}
+
+// 页码快速选择下拉：列出全部页码，选中即跳转
+const pageOptions = computed(() =>
+  Array.from({ length: totalPages.value }, (_, i) => ({
+    label: `第 ${i + 1} 页`,
+    value: String(i + 1),
+  })),
+)
+
+// 筛选/排序变化时回到第一页（此时才是真正的「重定位」：清空累积、滚回顶部）
+watch(() => videoStore.filter, () => {
+  currentPage.value = 1
+  nextTick(() => virtualGridRef.value?.scrollToTop())
+}, { deep: true })
 // 列表数据整体刷新后（刮削完成/删除等），当前页超出范围时回退到最后一页
 watch(filteredVideos, (list) => {
-  const total = Math.max(1, Math.ceil(list.length / PAGE_SIZE))
+  const total = Math.max(1, Math.ceil(list.length / pageSize.value))
   if (currentPage.value > total) currentPage.value = total
+})
+// 每页条数或浏览模式变化时，重置到第一页并回顶（切片方式改变，旧累积位置无意义）
+watch([pageSize, paginationMode], () => {
+  currentPage.value = 1
+  pageInput.value = '1'
+  nextTick(() => virtualGridRef.value?.scrollToTop())
 })
 
 // 视频总数显示
@@ -669,8 +730,8 @@ const showNonStandardLibrary = () => {
         <!-- 统计信息 -->
         <span class="text-sm text-muted-foreground">{{ videoCount }}</span>
 
-        <!-- 翻页 -->
-        <div v-if="totalPages > 1" class="flex items-center gap-1">
+        <!-- 翻页（仅上下翻页模式显示） -->
+        <div v-if="paginationMode === 'paged' && totalPages > 1" class="flex items-center gap-1">
           <Button
             variant="ghost"
             size="icon"
@@ -681,9 +742,30 @@ const showNonStandardLibrary = () => {
           >
             <ChevronLeft class="size-4" />
           </Button>
-          <span class="min-w-14 text-center text-sm text-muted-foreground tabular-nums">
-            {{ currentPage }} / {{ totalPages }}
-          </span>
+          <div class="flex items-center gap-1 text-sm text-muted-foreground tabular-nums">
+            <Input
+              type="number"
+              min="1"
+              :max="totalPages"
+              class="h-8 w-12 px-2 text-center"
+              :model-value="pageInput"
+              @update:model-value="(v) => (pageInput = String(v))"
+              @keydown.enter="commitPageInput"
+              @blur="commitPageInput"
+            />
+            <span>/ {{ totalPages }}</span>
+          </div>
+          <!-- 页码快速选择下拉 -->
+          <Select :model-value="String(currentPage)" @update:model-value="(v) => goToPage(Number(v))">
+            <SelectTrigger class="h-8 w-14 gap-0 px-2">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent class="max-h-72">
+              <SelectItem v-for="opt in pageOptions" :key="opt.value" :value="opt.value">
+                {{ opt.label }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
           <Button
             variant="ghost"
             size="icon"
@@ -754,6 +836,7 @@ const showNonStandardLibrary = () => {
         :view-mode="viewMode"
         @select="handleVideoSelect"
         @scrape="handleScrape"
+        @load-more="loadMore"
       />
     </div>
 

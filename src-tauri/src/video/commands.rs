@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tauri::AppHandle;
+use tauri::Manager;
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
@@ -477,20 +478,39 @@ pub async fn backfill_cover_dimensions(db: State<'_, crate::db::Database>) -> Ap
     .map_err(|e| AppError::TaskJoin(e.to_string()))?
 }
 
-/// 回填存量视频的网格缩略图：扫描有封面但缺 `cover_thumb` 的记录，从横版大图
-/// （fanart → thumb → poster）生成 `<stem>-thumbsm.jpg` 小图并写回。
+/// 网格缩略图的本地缓存目录：`<app_data_dir>/thumbs`（不存在则创建）。
 ///
-/// 媒体库网格逐张解码全尺寸大图是列表卡顿的主因，缩略图回填后前端优先用它。
-/// 返回成功生成的数量。生成失败的记录记下尝试时间，[`BACKFILL_RETRY_AFTER`] 内不再重试。
+/// 刻意不放在视频同目录：媒体库多在 SMB/USB 上，网格翻页逐张读网络盘的往返延迟
+/// 是剩余卡顿的主因；同时避免在媒体目录里留下媒体库软件不认的 `-thumbsm.jpg`。
+fn cover_thumb_cache_dir(app: &AppHandle) -> AppResult<std::path::PathBuf> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::Tauri(format!("无法获取应用数据目录: {}", e)))?
+        .join("thumbs");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
 #[tauri::command]
-pub async fn backfill_cover_thumbnails(db: State<'_, crate::db::Database>) -> AppResult<u32> {
+pub async fn backfill_cover_thumbnails(
+    app: AppHandle,
+    db: State<'_, crate::db::Database>,
+) -> AppResult<u32> {
     let conn = db.get_connection()?;
+    let cache_dir = cover_thumb_cache_dir(&app)?;
 
     tokio::task::spawn_blocking(move || -> AppResult<u32> {
-        let targets: Vec<(String, String, String, Option<String>, Option<String>, Option<String>)> = {
+        // 前缀匹配用 instr 而非 LIKE：目录名里的 `_` / `%` 不会被当作通配符
+        let cache_prefix = cache_dir.to_string_lossy().to_string();
+        let targets: Vec<(String, String, Option<String>, Option<String>, Option<String>)> = {
             let mut stmt = conn.prepare(
-                "SELECT id, video_path, dir_path, fanart, thumb, poster FROM videos
-                 WHERE (cover_thumb IS NULL OR cover_thumb = '')
+                "SELECT id, video_path, fanart, thumb, poster FROM videos
+                 WHERE (
+                        cover_thumb IS NULL OR cover_thumb = ''
+                        -- 旧版缩略图落在视频同目录（多在网络盘上），迁到本地缓存
+                     OR instr(cover_thumb, ?2) <> 1
+                   )
                    AND (
                         (fanart IS NOT NULL AND fanart <> '')
                      OR (thumb IS NOT NULL AND thumb <> '')
@@ -499,14 +519,13 @@ pub async fn backfill_cover_thumbnails(db: State<'_, crate::db::Database>) -> Ap
                    AND (cover_thumb_attempted_at IS NULL
                         OR cover_thumb_attempted_at < datetime('now', ?1))",
             )?;
-            let iter = stmt.query_map([BACKFILL_RETRY_AFTER], |row| {
+            let iter = stmt.query_map(rusqlite::params![BACKFILL_RETRY_AFTER, &cache_prefix], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
                 ))
             })?;
             let mut list = Vec::new();
@@ -517,13 +536,8 @@ pub async fn backfill_cover_thumbnails(db: State<'_, crate::db::Database>) -> Ap
         };
 
         let mut updated = 0u32;
-        for (id, video_path, dir_path, fanart, thumb, poster) in targets {
-            let Some(stem) = std::path::Path::new(&video_path)
-                .file_stem()
-                .and_then(|name| name.to_str())
-            else {
-                continue;
-            };
+        for (id, video_path, fanart, thumb, poster) in targets {
+            let dst = crate::media::artwork::cover_thumb_cache_path(&cache_dir, &video_path);
 
             // 与前端选图一致：横版优先（fanart → thumb → poster）。
             // 依次尝试：跳过不存在/0 字节/非普通文件的源，解码失败（AVIF 无 sips、损坏等）
@@ -542,11 +556,7 @@ pub async fn backfill_cover_thumbnails(db: State<'_, crate::db::Database>) -> Ap
                 if !matches!(std::fs::metadata(path), Ok(m) if m.is_file() && m.len() > 0) {
                     continue;
                 }
-                match crate::media::artwork::generate_cover_thumbnail(
-                    path,
-                    std::path::Path::new(&dir_path),
-                    stem,
-                ) {
+                match crate::media::artwork::generate_cover_thumbnail(path, &dst) {
                     Some(thumb_path) => {
                         generated = Some(thumb_path);
                         break;

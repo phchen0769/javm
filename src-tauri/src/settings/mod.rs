@@ -186,6 +186,12 @@ pub struct GeneralSettings {
     /// 用户自定义的额外视频扩展名（不含前导点，小写），扫描时与内置列表合并
     #[serde(rename = "videoExtensions", default)]
     pub video_extensions: Vec<String>,
+    /// 媒体库浏览模式：infinite=无限滚动，paged=上下翻页
+    #[serde(rename = "mediaPagination", default = "default_media_pagination")]
+    pub media_pagination: String,
+    /// 媒体库每页（每批）显示的资源数量
+    #[serde(rename = "mediaPageSize", default = "default_media_page_size")]
+    pub media_page_size: u32,
 }
 
 fn default_play_method() -> String {
@@ -202,6 +208,14 @@ fn default_view_mode() -> String {
 
 fn default_cover_type() -> String {
     "landscape".to_string()
+}
+
+fn default_media_pagination() -> String {
+    "infinite".to_string()
+}
+
+fn default_media_page_size() -> u32 {
+    100
 }
 
 fn default_true() -> bool {
@@ -702,6 +716,8 @@ impl Default for AppSettings {
                 cover_type: "landscape".to_string(),
                 actor_card_size: 160,
                 video_extensions: Vec::new(),
+                media_pagination: "infinite".to_string(),
+                media_page_size: 100,
             },
             download: DownloadSettings::default(),
             scrape: ScrapeSettings::default(),

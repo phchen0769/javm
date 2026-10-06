@@ -56,7 +56,7 @@ import {
 import { Textarea } from '@/components/ui/textarea'
 import AIConfigDialog from '@/components/AIConfigDialog.vue'
 import { selectDirectory } from '@/lib/tauri'
-import { THEME_OPTIONS, VIEW_MODE_OPTIONS, COVER_TYPE_OPTIONS, UPDATE_CHANNEL_OPTIONS, METADATA_STORAGE_MODE_OPTIONS } from '@/utils/constants'
+import { THEME_OPTIONS, VIEW_MODE_OPTIONS, COVER_TYPE_OPTIONS, UPDATE_CHANNEL_OPTIONS, METADATA_STORAGE_MODE_OPTIONS, MEDIA_PAGINATION_OPTIONS } from '@/utils/constants'
 import type { AIProvider, ViewMode } from '@/types'
 
 const route = useRoute()
@@ -271,6 +271,24 @@ const saveVideoExtensions = () => {
   })
 }
 
+// 媒体库每页显示数量（输入框展示态，暂存以便失焦时规范化）
+const mediaPageSizeInput = ref(String(settingsStore.settings.general.mediaPageSize ?? 100))
+
+// 输入时仅暂存，不做校验（避免输入过程被强制改值）
+const onMediaPageSizeInput = (v: unknown) => {
+  mediaPageSizeInput.value = String(v)
+}
+
+// 失焦时规范化：限 10~1000 整数，非法则回退默认值
+const saveMediaPageSize = () => {
+  const n = Math.round(Number(mediaPageSizeInput.value))
+  const clamped = Number.isFinite(n) && n >= 10 && n <= 1000 ? n : 100
+  mediaPageSizeInput.value = String(clamped)
+  settingsStore.updateSettings({
+    general: { ...settingsStore.settings.general, mediaPageSize: clamped },
+  })
+}
+
 // 是否为自定义代理
 const isCustomProxy = computed(() => {
   return localSettings.value.theme?.proxy?.type === 'custom'
@@ -437,6 +455,7 @@ onMounted(async () => {
     ai: { ...settingsStore.settings.ai },
   }
   videoExtInput.value = (settingsStore.settings.general.videoExtensions || []).join(', ')
+  mediaPageSizeInput.value = String(settingsStore.settings.general.mediaPageSize ?? 100)
 
   // 如果 store 中的保存路径为空，尝试获取系统默认下载路径
   if (!localSettings.value.download.savePath || localSettings.value.download.savePath.trim() === '') {
@@ -661,6 +680,7 @@ watch(() => settingsStore.settings, async (newSettings) => {
     ai: { ...newSettings.ai },
   }
   videoExtInput.value = (newSettings.general.videoExtensions || []).join(', ')
+  mediaPageSizeInput.value = String(newSettings.general.mediaPageSize ?? 100)
 
   // 如果 store 中的保存路径为空，尝试获取系统默认下载路径
   if (!localSettings.value.download.savePath || localSettings.value.download.savePath.trim() === '') {
@@ -739,6 +759,40 @@ watch(() => settingsStore.settings, async (newSettings) => {
                       </SelectItem>
                     </SelectContent>
                   </Select>
+                </div>
+
+                <Separator />
+
+                <!-- 媒体库浏览模式 -->
+                <div class="flex items-center justify-between">
+                  <div>
+                    <p class="font-medium">媒体库浏览模式</p>
+                    <p class="text-sm text-muted-foreground">无限滚动触底自动加载，上下翻页通过按钮翻页</p>
+                  </div>
+                  <Select :model-value="settingsStore.settings.general.mediaPagination || 'infinite'"
+                    @update:model-value="(v) => settingsStore.updateSettings({ general: { ...settingsStore.settings.general, mediaPagination: String(v) as import('@/types').MediaPagination } })">
+                    <SelectTrigger class="w-40">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="opt in MEDIA_PAGINATION_OPTIONS" :key="opt.value" :value="opt.value">
+                        {{ opt.label }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <Separator />
+
+                <!-- 每页显示数量 -->
+                <div class="flex items-center justify-between">
+                  <div>
+                    <p class="font-medium">每页显示数量</p>
+                    <p class="text-sm text-muted-foreground">媒体库每页（每批）加载的资源数量</p>
+                  </div>
+                  <Input type="number" min="10" max="1000" class="w-40"
+                    :model-value="mediaPageSizeInput"
+                    @update:model-value="onMediaPageSizeInput" @blur="saveMediaPageSize" />
                 </div>
 
                 <Separator />

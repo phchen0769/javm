@@ -118,6 +118,12 @@ export const COVER_TYPE_OPTIONS = [
     { label: '竖屏', value: 'portrait' },
 ]
 
+/** 媒体库浏览模式选项 */
+export const MEDIA_PAGINATION_OPTIONS = [
+    { label: '无限滚动', value: 'infinite' },
+    { label: '上下翻页', value: 'paged' },
+]
+
 /** 更新通道选项 */
 export const UPDATE_CHANNEL_OPTIONS = [
     { label: '正式版', value: 'stable', desc: '仅接收稳定的正式发布版本' },

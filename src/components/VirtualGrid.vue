@@ -27,6 +27,7 @@ const props = withDefaults(defineProps<Props>(), {
 const emit = defineEmits<{
   (e: 'select', video: Video): void
   (e: 'scrape', video: Video): void
+  (e: 'load-more'): void
 }>()
 
 const router = useRouter()
@@ -129,6 +130,8 @@ const savedScrollTop = ref(0)
 const firstVisibleRow = ref(0)
 let scrollDirection: 1 | -1 = 1
 let lastScrollTop = 0
+// 触底加载去重锁：触发一次 load-more 后置 false，待 items 变长后恢复
+let canLoadMore = true
 
 // 虚拟化的行范围只随「首可见行」变化（跨行时才重建 DOM），而不是随 scrollTop 每像素变化。
 // scrollTop 每像素变化本就不该触发整条 visibleRange→virtualRows 重算链。
@@ -342,7 +345,8 @@ const syncLayout = async () => {
 }
 
 const handleScroll = () => {
-  const currentScrollTop = containerRef.value?.scrollTop ?? 0
+  const container = containerRef.value
+  const currentScrollTop = container?.scrollTop ?? 0
   if (currentScrollTop > lastScrollTop) {
     scrollDirection = 1
   } else if (currentScrollTop < lastScrollTop) {
@@ -355,10 +359,32 @@ const handleScroll = () => {
   if (syncFirstVisibleRow(currentScrollTop)) {
     preloadNextCovers()
   }
+
+  // 触底自动加载下一页：滚到距底部阈值内时触发 load-more。
+  // 用 canLoadMore 去重：触发后置 false，待 items 变长（有更多内容可滚）后再恢复，
+  // 避免「仍在底部、每帧 scroll 事件都重复触发」的抖动。
+  if (container && canLoadMore && loadMoreThresholdReached(container)) {
+    canLoadMore = false
+    emit('load-more')
+  }
 }
 
-watch([() => props.items.length, columns, () => props.viewMode, containerWidth, containerHeight, coverLayout], () => {
+// 触底判定：滚动位置 + 视口高度 ≥ 总高度 - 阈值（阈值取 3 行，提前触发更跟手）
+const loadMoreThresholdReached = (container: HTMLElement): boolean => {
+  const threshold = rowHeight.value * 3
+  return container.scrollTop + container.clientHeight >= container.scrollHeight - threshold
+}
+
+// 分页追加（items 只增不减）时不清空预载：已渲染行 key 不变、DOM 不重建，清空预载反而
+// 会让新滚入的封面重新走解码，正是翻页卡顿的来源。这里只在「结构性变化」时清空。
+watch([columns, () => props.viewMode, containerWidth, containerHeight, coverLayout], () => {
   clearPreloadedCovers()
+  void syncLayout()
+})
+
+// items 增长（翻页/追加数据）时：恢复触底加载锁，并对新内容追加预载。
+watch(() => props.items.length, () => {
+  canLoadMore = true
   void syncLayout()
 })
 
@@ -386,6 +412,7 @@ const scrollToTop = () => {
   scrollTop.value = 0
   firstVisibleRow.value = 0
   lastScrollTop = 0
+  canLoadMore = true
   if (containerRef.value) {
     containerRef.value.scrollTop = 0
   }
