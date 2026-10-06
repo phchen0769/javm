@@ -11,6 +11,7 @@ import { Badge } from '@/components/ui/badge'
 import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
 import { Checkbox } from '@/components/ui/checkbox'
+import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -297,11 +298,13 @@ const prevPage = () => {
   }
 }
 
-// 页码输入框（翻页模式）：暂存用户输入，回车/失焦时跳转
+// 页码组合框（翻页模式）：一个框既能下拉选页、也能手动输入页码，回车/失焦跳转
 const pageInput = ref('1')
+const pagePopoverOpen = ref(false)
 watch(currentPage, (p) => { pageInput.value = String(p) })
 watch(totalPages, () => { pageInput.value = String(currentPage.value) })
 const commitPageInput = () => {
+  pagePopoverOpen.value = false
   const n = Math.round(Number(pageInput.value))
   if (!Number.isFinite(n)) {
     pageInput.value = String(currentPage.value)
@@ -319,6 +322,11 @@ const pageOptions = computed(() =>
     value: String(i + 1),
   })),
 )
+// 下拉选中某页：跳转并收起
+const selectPage = (value: string) => {
+  goToPage(Number(value))
+  pagePopoverOpen.value = false
+}
 
 // 筛选/排序变化时回到第一页（此时才是真正的「重定位」：清空累积、滚回顶部）
 watch(() => videoStore.filter, () => {
@@ -742,30 +750,38 @@ const showNonStandardLibrary = () => {
           >
             <ChevronLeft class="size-4" />
           </Button>
-          <div class="flex items-center gap-1 text-sm text-muted-foreground tabular-nums">
-            <Input
-              type="number"
-              min="1"
-              :max="totalPages"
-              class="h-8 w-12 px-2 text-center"
-              :model-value="pageInput"
-              @update:model-value="(v) => (pageInput = String(v))"
-              @keydown.enter="commitPageInput"
-              @blur="commitPageInput"
-            />
-            <span>/ {{ totalPages }}</span>
-          </div>
-          <!-- 页码快速选择下拉 -->
-          <Select :model-value="String(currentPage)" @update:model-value="(v) => goToPage(Number(v))">
-            <SelectTrigger class="h-8 w-14 gap-0 px-2">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent class="max-h-72">
-              <SelectItem v-for="opt in pageOptions" :key="opt.value" :value="opt.value">
-                {{ opt.label }}
-              </SelectItem>
-            </SelectContent>
-          </Select>
+          <!-- 页码组合框：既能下拉选页，也能手动输入页码 -->
+          <Popover v-model:open="pagePopoverOpen">
+            <PopoverTrigger as-child>
+              <div class="flex items-center gap-1 text-sm text-muted-foreground tabular-nums">
+                <Input
+                  type="number"
+                  min="1"
+                  :max="totalPages"
+                  class="h-8 w-12 px-2 text-center"
+                  :model-value="pageInput"
+                  @update:model-value="(v) => (pageInput = String(v))"
+                  @focus="pagePopoverOpen = true"
+                  @keydown.enter="commitPageInput"
+                  @blur="commitPageInput"
+                />
+                <span>/ {{ totalPages }}</span>
+              </div>
+            </PopoverTrigger>
+            <PopoverContent class="w-36 p-1" align="start" side="bottom">
+              <ScrollArea class="max-h-72">
+                <div
+                  v-for="opt in pageOptions"
+                  :key="opt.value"
+                  class="cursor-pointer rounded-md px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
+                  :class="String(currentPage) === opt.value ? 'bg-accent text-accent-foreground' : ''"
+                  @mousedown.prevent="selectPage(opt.value)"
+                >
+                  {{ opt.label }}
+                </div>
+              </ScrollArea>
+            </PopoverContent>
+          </Popover>
           <Button
             variant="ghost"
             size="icon"
