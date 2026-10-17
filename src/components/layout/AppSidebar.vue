@@ -6,7 +6,8 @@ import {
   FolderOpen,
   Download,
   Radar,
-  Settings
+  Settings,
+  Bookmark
 } from 'lucide-vue-next'
 import {
   Sidebar,
@@ -47,6 +48,11 @@ const navItems = [
     title: '刮削',
     icon: Radar,
     path: '/resource-scrape',
+  },
+  {
+    title: '网站收藏',
+    icon: Bookmark,
+    path: '/site-favorites',
   },
   {
     title: '系统设置',

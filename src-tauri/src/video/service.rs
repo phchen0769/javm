@@ -64,9 +64,13 @@ fn has_same_named_parent_dir(video_path: &std::path::Path) -> bool {
     parent_name.eq_ignore_ascii_case(file_stem)
 }
 
-fn delete_if_exists(path: &std::path::Path) {
-    if path.exists() {
-        let _ = std::fs::remove_file(path);
+/// 将文件/目录移入系统回收站（失败仅记日志，不中断删除流程），避免误删后无法恢复
+fn trash_if_exists(path: &std::path::Path) {
+    if !path.exists() {
+        return;
+    }
+    if let Err(e) = trash::delete(path) {
+        log::warn!("[video_delete] event=trash_failed path={} error={}", path.display(), e);
     }
 }
 
@@ -133,7 +137,7 @@ fn delete_matching_subtitle_files(video_path: &std::path::Path) {
     for entry in entries.flatten() {
         let candidate = entry.path();
         if is_matching_subtitle_file(video_path, &candidate) {
-            let _ = std::fs::remove_file(candidate);
+            trash_if_exists(&candidate);
         }
     }
 }
@@ -147,25 +151,22 @@ fn delete_video_scrape_assets(
     thumb: Option<String>,
     fanart: Option<String>,
 ) {
-    use std::fs;
     use std::path::Path;
 
-    delete_if_exists(&video_path.with_extension("nfo"));
+    trash_if_exists(&video_path.with_extension("nfo"));
 
     for image_path in [poster, thumb, fanart].into_iter().flatten() {
-        delete_if_exists(Path::new(&image_path));
+        trash_if_exists(Path::new(&image_path));
     }
 
     for suffix in ["poster", "thumb", "fanart"] {
         if let Some(image_path) = crate::media::assets::find_sibling_artwork(video_path, suffix) {
-            delete_if_exists(Path::new(&image_path));
+            trash_if_exists(Path::new(&image_path));
         }
     }
 
     if let Ok(extrafanart_dir) = crate::media::assets::extrafanart_dir_for_video(video_path) {
-        if extrafanart_dir.exists() && extrafanart_dir.is_dir() {
-            let _ = fs::remove_dir_all(&extrafanart_dir);
-        }
+        trash_if_exists(&extrafanart_dir);
     }
 }
 
@@ -212,7 +213,6 @@ pub(crate) fn clear_video_scrape_data(conn: &rusqlite::Connection, id: &str) -> 
 }
 
 pub(crate) fn delete_video_and_files(conn: &rusqlite::Connection, id: &str) -> Result<(), String> {
-    use std::fs;
     use std::path::Path;
 
     // 获取视频路径和同级图路径
@@ -229,13 +229,14 @@ pub(crate) fn delete_video_and_files(conn: &rusqlite::Connection, id: &str) -> R
     if has_same_named_parent_dir(path_obj) {
         if let Some(parent_dir) = path_obj.parent() {
             if parent_dir.exists() {
-                fs::remove_dir_all(parent_dir)
-                    .map_err(|e| format!("删除同名目录失败 '{}': {}", parent_dir.display(), e))?;
+                trash::delete(parent_dir)
+                    .map_err(|e| format!("移入回收站失败 '{}': {}", parent_dir.display(), e))?;
             }
         }
     } else {
         // 删除视频文件
-        delete_if_exists(path_obj);
+        trash::delete(path_obj)
+            .map_err(|e| format!("移入回收站失败 '{}': {}", path_obj.display(), e))?;
 
         // 删除同名元数据和字幕
         delete_video_scrape_assets(path_obj, poster.clone(), thumb.clone(), fanart.clone());

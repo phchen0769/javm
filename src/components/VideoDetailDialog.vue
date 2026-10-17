@@ -768,7 +768,6 @@ const handleSave = async () => {
                 thumbs: pendingPreviewThumbs.value,
                 remoteThumbs: pendingRemotePreviewThumbs.value,
                 originalTitle: formData.value.originalTitle,
-                targetTitle: formData.value.title,
             }
 
             const saved = await scrapeStore.scrapeSave(props.video.id, metadata)

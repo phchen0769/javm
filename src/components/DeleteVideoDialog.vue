@@ -53,7 +53,7 @@ const deleteDescription = computed(() => {
     return '将仅删除 NFO、封面图、预览图等刮削产物，并重置刮削状态，视频文件会保留。'
   }
 
-  return '此操作将删除视频文件、NFO 文件、封面图和相关数据，无法恢复。'
+  return '此操作将把视频文件、NFO、封面图等相关数据移入系统回收站，可从回收站恢复。'
 })
 
 const confirmText = computed(() => {

@@ -45,6 +45,14 @@ const router = createRouter({
             },
         },
         {
+            path: '/site-favorites',
+            name: 'site-favorites',
+            component: () => import('@/views/SiteFavoritesView.vue'),
+            meta: {
+                title: '网站收藏',
+            },
+        },
+        {
             path: '/settings',
             name: 'settings',
             component: () => import('@/views/SettingsView.vue'),

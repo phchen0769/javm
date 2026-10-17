@@ -1,6 +1,6 @@
 [package]
 name = "javm"
-version = "0.6.3"
+version = "2.0.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -53,6 +53,7 @@ wreq-util = "2"
 tauri-plugin-log = "2.8.0"
 log = "0.4.33"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+trash = "5"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
